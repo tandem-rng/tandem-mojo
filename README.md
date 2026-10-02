@@ -19,11 +19,10 @@ through the Metal toolchain, which needs a full Xcode install, not the Command L
 
 ## Speed
 
-Apple M4, one thread, `pixi run bench`, 2^24 words, minimum of seven after a warm-up,
-load 2: `fill_u32` 17.0 GiB/s.
+Apple M4, one thread, `pixi run bench`, 2^24 words, minimum of seven after a warm-up: `fill_u32` 17.0 GiB/s.
 
 NVIDIA A100 40 GB (PCIe), `pixi run bench-gpu`, 2^28 words into device memory, minimum of 21
-after a 0.5 s warm-up, GPU idle, host load 33: `fill_u32_gpu` 1188 GiB/s. The kernel stores
+after a 0.5 s warm-up, GPU idle: `fill_u32_gpu` 1188 GiB/s. The kernel stores
 each block from registers; it has no shared-memory tile yet.
 
 ## License
