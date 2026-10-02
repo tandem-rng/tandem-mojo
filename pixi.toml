@@ -1,0 +1,14 @@
+[workspace]
+name = "tandem-mojo"
+channels = ["https://conda.modular.com/max/", "conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[dependencies]
+mojo = ">=1.1"
+max = ">=26.6"
+
+[tasks]
+test = "mojo run -I . tests/test_tandem.mojo"
+bench = "mojo run -I . tools/bench.mojo"
+test-gpu = "mojo run -I . tests/test_gpu.mojo"
+bench-gpu = "mojo run -I . tools/bench_gpu.mojo"
