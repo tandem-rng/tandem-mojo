@@ -614,9 +614,8 @@ struct Tandem(Copyable, Movable, Equatable):
         return to_f64(self.at_u64(i))
 
     # Bounded integers and normals ----------------------------------------------------------
-    # Not part of the specification. They follow the shared device core, tandem-cuda's
-    # core.hpp, so every port returns the same integers. The normals are byte identical to
-    # tandem-c and agree with the core's libm normals to a few ulps.
+    # The non-normative Appendix A of the specification. The integers equal those of every port,
+    # and the normals are byte identical to tandem-c.
 
     def below_u32(mut self, n: UInt32) -> UInt32:
         """Uniform in 0..n by Lemire's multiply and reject on u32 draws. For n == 0 the result
