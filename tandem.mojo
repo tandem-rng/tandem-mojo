@@ -5,7 +5,7 @@
 from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left
 from std.math import iota
 from std.memory import bitcast, stack_allocation
-from std.sys import has_accelerator
+from std.sys import bit_width_of, has_accelerator
 from max.gpu import block_dim, block_idx, thread_idx
 from max.gpu.host import DeviceContext
 
@@ -556,8 +556,22 @@ def fill_u32[origin: Origin[mut=True]](key: SIMD[DType.uint32, 4], pos: UInt64, 
 # ---- GPU fill ------------------------------------------------------------------------------
 
 
-def fill_rows_kernel(dst: Pointer[UInt32, MutAnyOrigin], k0: UInt32, k1: UInt32, k2: UInt32, k3: UInt32, first_row: UInt64, nrows: UInt64, K: UInt32):
+@always_inline
+def block_elements[kind: Int, T: DType](b: SIMD[DType.uint32, 4]) -> SIMD[T, 128 // bit_width_of[T]()]:
+    """The 128 / W elements of one 16-byte block."""
+    comptime N = 128 // bit_width_of[T]()
+    comptime if kind == KIND_INT:
+        return bitcast[T, N](b)
+    elif kind == KIND_F32:
+        return rebind[SIMD[T, N]]((b >> 8).cast[DType.float32]() * 5.9604645e-08)
+    else:
+        var x = bitcast[DType.uint64, 2](b)
+        return rebind[SIMD[T, N]]((x >> 11).cast[DType.float64]() * 1.1102230246251565e-16)
+
+
+def fill_rows_kernel[kind: Int, T: DType](dst: Pointer[Scalar[T], MutAnyOrigin], k0: UInt32, k1: UInt32, k2: UInt32, k3: UInt32, first_row: UInt64, nrows: UInt64, K: UInt32):
     """One thread per chunk: seed, then store its K blocks in row order."""
+    comptime N = 128 // bit_width_of[T]()
     var tid = UInt64(block_idx.x) * UInt64(block_dim.x) + UInt64(thread_idx.x)
     var g = first_row / UInt64(K) + tid / 8
     var lane = tid % 8
@@ -569,12 +583,32 @@ def fill_rows_kernel(dst: Pointer[UInt32, MutAnyOrigin], k0: UInt32, k1: UInt32,
         s.step()
         var row = row0 + UInt64(j)
         if row >= first_row and row < first_row + nrows:
-            var at = Int((row - first_row) * 32 + lane * 4)
-            dst.unsafe_offset(at).unsafe_store(SIMD[DType.uint32, 4](s.o0[0], s.o1[0], s.o2[0], s.o3[0]))
+            var at = Int((row - first_row) * UInt64(1024 // bit_width_of[T]()) + lane * UInt64(N))
+            dst.unsafe_offset(at).unsafe_store(block_elements[kind, T](SIMD[DType.uint32, 4](s.o0[0], s.o1[0], s.o2[0], s.o3[0])))
+
+
+def fill_gpu[kind: Int, T: DType, origin: Origin[mut=True]](ctx: DeviceContext, key: SIMD[DType.uint32, 4], first_row: UInt64, nrows: UInt64, K: UInt32, dst: Pointer[Scalar[T], origin]) raises:
+    """Rows [first_row, first_row + nrows) into device memory, 1024 / W elements per row."""
+    var groups = (first_row + nrows + UInt64(K) - 1) / UInt64(K) - first_row / UInt64(K)
+    var threads = Int(groups * 8)
+    ctx.enqueue_function[fill_rows_kernel[kind, T]](dst.unsafe_origin_cast[MutAnyOrigin](), key[0], key[1], key[2], key[3], first_row, nrows, K, grid_dim=(threads + 255) // 256, block_dim=256)
 
 
 def fill_u32_gpu[origin: Origin[mut=True]](ctx: DeviceContext, key: SIMD[DType.uint32, 4], first_row: UInt64, nrows: UInt64, K: UInt32, dst: Pointer[UInt32, origin]) raises:
     """Rows [first_row, first_row + nrows) into device memory, 32 words per row."""
-    var groups = (first_row + nrows + UInt64(K) - 1) / UInt64(K) - first_row / UInt64(K)
-    var threads = Int(groups * 8)
-    ctx.enqueue_function[fill_rows_kernel](dst.unsafe_origin_cast[MutAnyOrigin](), key[0], key[1], key[2], key[3], first_row, nrows, K, grid_dim=(threads + 255) // 256, block_dim=256)
+    fill_gpu[KIND_INT, DType.uint32](ctx, key, first_row, nrows, K, dst)
+
+
+def fill_u64_gpu[origin: Origin[mut=True]](ctx: DeviceContext, key: SIMD[DType.uint32, 4], first_row: UInt64, nrows: UInt64, K: UInt32, dst: Pointer[UInt64, origin]) raises:
+    """Rows [first_row, first_row + nrows) into device memory, 16 values per row."""
+    fill_gpu[KIND_INT, DType.uint64](ctx, key, first_row, nrows, K, dst)
+
+
+def fill_f32_gpu[origin: Origin[mut=True]](ctx: DeviceContext, key: SIMD[DType.uint32, 4], first_row: UInt64, nrows: UInt64, K: UInt32, dst: Pointer[Float32, origin]) raises:
+    """Rows [first_row, first_row + nrows) into device memory, 32 values per row."""
+    fill_gpu[KIND_F32, DType.float32](ctx, key, first_row, nrows, K, dst)
+
+
+def fill_f64_gpu[origin: Origin[mut=True]](ctx: DeviceContext, key: SIMD[DType.uint32, 4], first_row: UInt64, nrows: UInt64, K: UInt32, dst: Pointer[Float64, origin]) raises:
+    """Rows [first_row, first_row + nrows) into device memory, 16 values per row."""
+    fill_gpu[KIND_F64, DType.float64](ctx, key, first_row, nrows, K, dst)
