@@ -1,5 +1,6 @@
-# Tandem8x32 in Mojo: the building blocks of https://github.com/tandem-rng/spec, a CPU row
-# fill over eight SIMD lanes, and a GPU row fill with one thread per chunk.
+# Tandem8x32 in Mojo, after https://github.com/tandem-rng/spec: the building blocks, the Tandem
+# generator with scalar draws, CPU fills over eight SIMD lanes, and GPU fills with one thread
+# per chunk.
 # Copyright 2026 Jessica Cox. Apache License 2.0, see LICENSE.
 
 from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left

@@ -1,31 +1,140 @@
 # tandem-mojo
 
-Prototype of [Tandem8x32](https://github.com/tandem-rng/spec) in Mojo, in one file,
-`tandem.mojo`: the specification's building blocks, a `Tandem` generator with scalar draws of
-every specification type, CPU fills over eight SIMD lanes for every width and float type, and a
-GPU row fill with one thread per chunk for u32, u64, f32 and f64. It produces the stream the
-specification defines, bit for bit. Bounded integers (`below_u32`, `below_u64`) and standard
-normals (`normal_f64`, `normal_f32`, and the pairs `normal2_*`) with fills follow the shared device core in `tandem-cuda`.
+Mojo implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
+pseudorandom number generator built to be fast on CPUs and GPUs alike. It produces the stream
+the specification defines, bit for bit. The whole port is one file, `tandem.mojo`.
+
+- A `Tandem` is its transport form (128-bit key, 64-bit bit position, chunk length `K`) plus a
+  cache of the current 1024-bit row.
+- Scalar draws of every type in the specification: `Bool`, 8 to 128-bit unsigned and signed
+  integers, `Float32`, `Float64`, binary16 as `UInt16` bit patterns, `char` as a `UInt32` code
+  point, complex `Float16`, `Float32` and `Float64` as pairs. Random access without advancing
+  (`at_*`). Split by index, fork at the current block, sub by purpose, seed whitening, and a raw-key
+  constructor.
+- CPU fills for every one of those types over eight SIMD lanes: `fill_u8` to `fill_u128`,
+  `fill_i8` to `fill_i128`, `fill_f32`, `fill_f64`, `fill_f16_bits`, `fill_char`, `fill_bool`,
+  `fill_c16_bits`, `fill_c32`, `fill_c64`. Every fill equals the scalar draws it replaces.
+- GPU fills into device memory for `u32`, `u64`, `f32` and `f64`: one thread per chunk, each
+  thread stores its blocks from registers.
+- Bounded integers (`below_u32`, `below_u64`) and standard normals (`normal_f64`, `normal_f32`,
+  and the pairs `normal2_f64`, `normal2_f32`) with fills. They are not in the specification.
+  They follow the shared device core in `tandem-cuda`, so every port returns the same integers
+  and `f64` normals up to the last bits of `log`, `cos` and `sin`. A bound of 0 returns 0 after
+  one draw. `fill_below_*` takes draw `i` of the plain fill for element `i` and consumes exactly
+  one draw per element. A rejected draw retries on `sub(purpose).split(i)` of the key, as the
+  device core does. A normal step uses two uniforms and returns the cos half then the sin half.
+  A scalar normal is the cos half, and a normal fill is the flattened pairs, so an odd count
+  consumes both uniforms of its last pair. An `f32` normal runs in `f32` with the angle taken in
+  `f64`, so ports agree on it to a few ulps, not bit for bit.
+
+## Use
 
 ```sh
 pixi install          # Mojo 1.1 and MAX 26.6 from the Modular conda channel
-pixi run test         # vectors and the reference u32 dump, CPU
-pixi run bench        # CPU fill, 2^24 words
+pixi run test         # CPU tests
+pixi run bench        # CPU fills
 pixi run test-gpu     # on a host with a supported GPU
 pixi run bench-gpu
 ```
+
+```mojo
+from std.memory.alloc import unsafe_alloc
+from tandem import Tandem
+
+def main() raises:
+    var rng = Tandem(42)                       # 128-bit seed, default K
+    var x = rng.next_f64()
+    var words = unsafe_alloc[UInt32](1 << 20)
+    rng.fill_u32(words, 1 << 20)
+    var c = rng.next_c64()                     # (re, im), two f64 draws
+    var i = rng.below_u32(10)                  # uniform in 0..10, Lemire
+    var z = rng.normal_f64()                   # Box-Muller from two f64 draws
+    var worker = rng.split(7)                  # by index, from the key alone
+    var kids = rng.fork(4)                     # from the current block, parent moves on
+    var raw = Tandem.from_key(rng.key, rng.position(), rng.k)
+```
+
+`Tandem(seed)` and `Tandem.from_key` raise when `K` is not a power of two in 1 to 65536.
+Every draw aligns the position to the width of its type first, and every fill returns the
+generator where the same number of scalar draws would leave it. Fills take a pointer and a count.
+Complex fills take the number of complex values and write interleaved `(re, im)` components.
+
+## GPU
+
+```mojo
+from max.gpu.host import DeviceContext
+from tandem import fill_f64_gpu, seed
+
+var ctx = DeviceContext()
+var dev = ctx.enqueue_create_buffer[DType.float64](1 << 24)
+fill_f64_gpu(ctx, seed(42), 0, (1 << 24) // 16, 32, dev.unsafe_ptr())   # rows 0 to 2^20
+```
+
+`fill_u32_gpu`, `fill_u64_gpu`, `fill_f32_gpu` and `fill_f64_gpu` write whole rows,
+`[first_row, first_row + nrows)`, of 32, 16, 32 and 16 values, so a GPU fill and a CPU fill from
+bit position `1024 * first_row` agree. The GPU fills take a key and a row range, not a `Tandem`,
+and do not move a position.
 
 The GPU fill needs the `max` package. On an NVIDIA driver older than 580 set
 `MODULAR_NVPTX_COMPILER_PATH` to a CUDA 12.8 `ptxas`. On macOS, Mojo compiles GPU kernels
 through the Metal toolchain, which needs a full Xcode install, not the Command Line Tools.
 
+## Tests
+
+```sh
+pixi run test
+```
+
+- `tests/test_vectors.mojo` checks every vector of the specification.
+  `tests/vectors_data.mojo` is generated from the spec repository's `vectors.json` by
+  `tools/gen_vectors.py`, and CI fails when it is out of date.
+- `tests/test_dumps.mojo` compares long fills, scalar draws and random access with the
+  reference stream dumps in `tests/data`, complex fills included. The dumps are copies of
+  `tandem-c/tests/data`, and CI fails when they differ.
+- `tests/test_tandem.mojo` covers scalar draws of every width, alignment, random access,
+  `set_position`, chunk lengths, split, sub and fork.
+- `tests/test_fills.mojo` compares every fill with the scalar draws of its type, at chunk
+  lengths, offsets and lengths that cut rows and chunks, and checks the position afterwards.
+- `tests/test_derived.mojo` compares bounded integers and normals with the cross-check values
+  of `tandem-c`, which it generates from the `tandem-cuda` core (`tools/gen_derived.py` converts
+  them), checks the bounded fills against their definition, the normal fills against the
+  flattened pairs, and the moments of the normals.
+- `tests/test_gpu.mojo` (`pixi run test-gpu`, on a GPU host) compares the GPU fills with the
+  CPU fills over chunk lengths and row ranges, and with the dump. CI does not run it.
+
 ## Speed
 
-Apple M4, one thread, `pixi run bench`, 2^24 words, minimum of seven after a warm-up: `fill_u32` 17.0 GiB/s.
+One thread, `pixi run bench`, minimum of seven runs of 2^24 elements after a warm-up, in GiB/s.
 
-NVIDIA A100 40 GB (PCIe), `pixi run bench-gpu`, 2^28 words into device memory, minimum of 21
-after a 0.5 s warm-up, GPU idle: `fill_u32_gpu` 1188 GiB/s. The kernel stores
-each block from registers; it has no shared-memory tile yet.
+| Apple M4 | GiB/s |
+|---|---|
+| `fill_u32` | 15.9 |
+| `fill_u64` | 16.2 |
+| `fill_f32` | 13.9 |
+| `fill_f64` | 14.4 |
+| `next_f64` chain, ns per draw | 2.74 |
+
+GPU fills into device memory, `pixi run bench-gpu`, 1 GiB per fill, minimum of 21 after a
+half-second warm-up, GPU idle, in GiB/s.
+
+| NVIDIA A100 40 GB PCIe | GiB/s |
+|---|---|
+| `fill_u32_gpu` | 1189 |
+| `fill_u64_gpu` | 1218 |
+| `fill_f32_gpu` | 1170 |
+| `fill_f64_gpu` | 1202 |
+
+The CPU fill converts floats in the same pass that stores the row. The GPU kernel stores each
+block from registers and has no shared-memory tile.
+
+## AI assistance
+
+This port was written with the help of large language models under human
+direction. The design and the specification are human work, as is much of the
+Julia implementation. The code is tested bit for bit against every vector of
+the specification and against long stream dumps from the Julia implementation,
+and every value must match. The output does not depend on who or what wrote the
+code.
 
 ## License
 
