@@ -3,6 +3,7 @@
 # tandem-mojo
 
 [![CI](https://github.com/tandem-rng/tandem-mojo/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tandem-rng/tandem-mojo/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-tandem--rng.github.io-7fb3ee.svg)](https://tandem-rng.github.io/tandem-mojo/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 Mojo implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
@@ -33,4 +34,4 @@ See [API](docs/api.md) for every draw and the GPU fills, and [tests](docs/tests.
 
 Portions of the code were generated with the assistance of LLMs.
 
-[Documentation](docs/index.md) · [Apache 2.0 license](LICENSE)
+[Documentation](https://tandem-rng.github.io/tandem-mojo/) · [Apache 2.0 license](LICENSE)

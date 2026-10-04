@@ -1,7 +1,12 @@
-# tandem-mojo documentation
+# tandem-mojo
+
+Mojo implementation of Tandem8x32 in one file, `tandem.mojo`. It produces the stream of the
+[specification](https://github.com/tandem-rng/spec/blob/main/SPEC.md) bit for bit, with SIMD
+fills on CPUs and MAX fills on GPUs.
 
 - [API](api.md): the generator, draws, fills, bounded integers, normals, exponentials and GPU fills.
-- [Tests](tests.md): what the suite checks.
+- [Design](design.md): how the fills, bounded integers, normals and exponentials work.
+- [Tests](tests.md): what the suite checks, where the fixtures come from, and what CI runs.
 - [Speed](speed.md): Apple M4 and A100 figures.
 
 ## Install

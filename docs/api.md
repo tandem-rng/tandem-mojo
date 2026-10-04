@@ -1,5 +1,7 @@
 # API
 
+## Use
+
 ```mojo
 from std.memory.alloc import unsafe_alloc
 from tandem import Tandem
@@ -25,7 +27,7 @@ var dev = ctx.enqueue_create_buffer[DType.float64](1 << 24)
 fill_f64_gpu(ctx, seed(42), 0, (1 << 24) // 16, 32, dev.unsafe_ptr())   # rows 0 to 2^20
 ```
 
-## What it provides
+## Reference
 
 - `Tandem`: a generator with a 128-bit key, 64-bit bit position and chunk length `K`.
   `Tandem(seed)` and `Tandem.from_key` raise when `K` is not a power of two in 1 to 65536.
@@ -44,39 +46,6 @@ fill_f64_gpu(ctx, seed(42), 0, (1 << 24) // 16, 32, dev.unsafe_ptr())   # rows 0
 - GPU fills `fill_u32_gpu`, `fill_u64_gpu`, `fill_f32_gpu`, `fill_f64_gpu`. They take a key
   and a row range, write whole rows and agree with the CPU fill from bit position
   `1024 * first_row`.
-- Parallel use: element `i` of a fill is draw `i`, so any decomposition reproduces a serial run.
-  See [Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative).
-
-## Design
-
-- A `Tandem` is its transport form (128-bit key, 64-bit bit position, chunk length `K`) plus a
-  cache of the current 1024-bit row.
-- Scalar draws include signed integers. Seed whitening and a raw-key constructor are
-  available. Random access is `at_*`.
-- GPU fills into device memory for `u32`, `u64`, `f32` and `f64`: one thread per chunk, each
-  thread stores its blocks from registers.
-- Bounded integers and standard normals are not in the specification. They follow the shared
-  device core in `tandem-cuda`, so every port returns the same integers. A bound of 0 returns 0
-  after one draw. `fill_below_*` takes draw `i` of the plain fill for element `i` and consumes
-  exactly one draw per element. A rejected draw retries on `sub(purpose).split(g)` of the
-  key, with `g` the global draw index, the aligned start position over the draw width plus `i`,
-  so a fill cut into chunks equals the whole fill. The bounded APIs are typed by draw width,
-  `below_u32` and `below_u64`, so the draw width never depends on a result type. They exist on
-  the CPU only.
-- A normal step uses two uniforms and returns the cos half then the sin half. A scalar normal
-  is the cos half, and a normal fill is the flattened pairs, so an odd count consumes both
-  uniforms of its last pair. An empty bounded or normal fill moves nothing.
-- The normals run on SIMD lanes with the algorithm and coefficients of `tandem-c` and an
-  explicit fused multiply-add for every multiply-add, so they are byte identical to `tandem-c`
-  (same SHA-256 from `tools/dump_normals.mojo` and `tools/dump_normals.c`, checked on arm64).
-  They agree with libm to about 1e-15 in `f64`. The `f32` normal runs in `f32`.
-- The bounded fills do the multiply-high and the compare on SIMD lanes (u32) or on the integer
-  pipes beside the row generator (u64), and only a rejection takes a scalar fixup.
-- Exponentials are `-log(1 - u)` of one uniform per element. Element `i` of a fill is the
-  scalar draw `i`, and an empty fill moves nothing. They reuse the polynomial logarithm of the
-  normals with an explicit fused multiply-add for every multiply-add, in `f64` from `f64` draws
-  and in `f32` from `f32` draws, so the bytes equal `tandem-c`'s (FNV-1a `47f8f98297d94ee2`
-  over 1e6 values of each width from five positions).
 
 ## Positions and fills
 
@@ -95,3 +64,8 @@ var raw = Tandem.from_key(rng.key, rng.position(), rng.k)
 `[first_row, first_row + nrows)`, of 32, 16, 32 and 16 values, so a GPU fill and a CPU fill
 from bit position `1024 * first_row` agree. The GPU fills take a key and a row range, not a
 `Tandem`, and do not move a position.
+
+## Parallel use
+
+Element `i` of a fill is draw `i`, so any decomposition reproduces a serial run.
+See [Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative).

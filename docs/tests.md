@@ -5,14 +5,16 @@ pixi run test         # CPU tests
 pixi run test-gpu     # on a host with a supported GPU
 ```
 
+## Suite
+
 - The specification vectors in `tests/vectors_data.mojo`, generated from the spec's `vectors.json`.
 - Long fills, scalar draws and random access against the dumps in `tests/data`, copied from
   `tandem-c/tests/data`.
 - Fills against the scalar draws at offsets and lengths that cut rows and chunks.
 - Bounded integers, normals and exponentials against the tandem-c cross fixtures and hashes.
-- GPU fills against the CPU fills. CI does not run them.
+- GPU fills against the CPU fills.
 
-## Files
+### Files
 
 - `tests/test_vectors.mojo` checks every vector of the specification.
   `tests/vectors_data.mojo` is generated from the spec repository's `vectors.json` by
@@ -39,3 +41,15 @@ pixi run test-gpu     # on a host with a supported GPU
   1e7 draws of each width against Exp(1).
 - `tests/test_gpu.mojo` compares the GPU fills with the CPU fills over chunk lengths and row
   ranges, and with the dump.
+
+## Fixtures
+
+`tests/vectors_data.mojo` is generated from the spec repository's `vectors.json` by
+`tools/gen_vectors.py`. The dumps in `tests/data` are copies of `tandem-c/tests/data`.
+`tools/gen_derived.py` converts the cross-check values of `tandem-c` and the fill fixtures of
+`tandem-cuda` that `tandem-c` carries.
+
+## CI
+
+- CI runs `pixi run test` on Ubuntu. CI does not run the GPU tests.
+- One job checks that the vector data is current, and one that the derived data and dumps are.
