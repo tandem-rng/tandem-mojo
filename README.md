@@ -59,6 +59,12 @@ Every draw aligns the position to the width of its type first, and every fill re
 generator where the same number of scalar draws would leave it. Fills take a pointer and a count.
 Complex fills take the number of complex values and write interleaved `(re, im)` components.
 
+Parallel use: element `i` of a fill is draw `i`, so ranks, threads or devices that start at the
+position of their first element, or draw from `split(task)`, reproduce a serial run for any
+decomposition, as
+[Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative)
+of the specification shows.
+
 ## GPU
 
 ```mojo
