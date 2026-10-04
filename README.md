@@ -24,8 +24,13 @@ the specification defines, bit for bit. The whole port is one file, `tandem.mojo
   one draw per element. A rejected draw retries on `sub(purpose).split(i)` of the key, as the
   device core does. A normal step uses two uniforms and returns the cos half then the sin half.
   A scalar normal is the cos half, and a normal fill is the flattened pairs, so an odd count
-  consumes both uniforms of its last pair. An `f32` normal runs in `f32` with the angle taken in
-  `f64`, so ports agree on it to a few ulps, not bit for bit.
+  consumes both uniforms of its last pair. An empty bounded or normal fill moves nothing.
+  The normals are computed on SIMD lanes with near-minimax polynomials for the logarithm and
+  the angle (`tools/gen_coefficients.py`), accurate to about 1e-15 in `f64`, so a scalar normal
+  and a fill agree bit for bit and the ports agree to the tolerances of the cross-check values,
+  not bit for bit. The `f32` normal runs in `f32`. The bounded fills do the multiply-high and
+  the compare on SIMD lanes (u32) or on the integer pipes beside the row generator (u64), and
+  only a rejection takes a scalar fixup.
 
 ## Use
 
@@ -102,9 +107,12 @@ pixi run test
 - `tests/test_fills.mojo` compares every fill with the scalar draws of its type, at chunk
   lengths, offsets and lengths that cut rows and chunks, and checks the position afterwards.
 - `tests/test_derived.mojo` compares bounded integers and normals with the cross-check values
-  of `tandem-c`, which it generates from the `tandem-cuda` core (`tools/gen_derived.py` converts
-  them), checks the bounded fills against their definition, the normal fills against the
-  flattened pairs, and the moments of the normals.
+  of `tandem-c`, which it generates from the `tandem-cuda` core, and the bounded and normal
+  fills with the fill fixtures of `tandem-cuda` that `tandem-c` carries
+  (`tools/gen_derived.py` converts both). It checks the bounded fills against their definition
+  and at every length that cuts a SIMD block, the normal fills against the flattened pairs, the
+  polynomials against libm over 2^18 pairs and the edges of the range, the moments of the
+  normals, and that an empty fill moves nothing.
 - `tests/test_gpu.mojo` (`pixi run test-gpu`, on a GPU host) compares the GPU fills with the
   CPU fills over chunk lengths and row ranges, and with the dump. CI does not run it.
 
@@ -114,24 +122,32 @@ One thread, `pixi run bench`, minimum of seven runs of 2^24 elements after a war
 
 | Apple M4 | GiB/s |
 |---|---|
-| `fill_u32` | 15.9 |
-| `fill_u64` | 16.2 |
-| `fill_f32` | 13.9 |
-| `fill_f64` | 14.4 |
-| `next_f64` chain, ns per draw | 2.74 |
+| `fill_u32` | 17.9 |
+| `fill_u64` | 17.8 |
+| `fill_f32` | 15.6 |
+| `fill_f64` | 15.6 |
+| `fill_below_u32`, bound 1000 | 11.5 |
+| `fill_below_u64`, bound 1000 | 10.5 |
+| `fill_normal_f32` | 5.5 |
+| `fill_normal_f64` | 4.99 |
+| `next_f64` chain, ns per draw | 2.68 |
 
 GPU fills into device memory, `pixi run bench-gpu`, 1 GiB per fill, minimum of 21 after a
 half-second warm-up, GPU idle, in GiB/s.
 
 | NVIDIA A100 40 GB PCIe | GiB/s |
 |---|---|
-| `fill_u32_gpu` | 1189 |
-| `fill_u64_gpu` | 1218 |
-| `fill_f32_gpu` | 1170 |
-| `fill_f64_gpu` | 1202 |
+| `fill_u32_gpu` | 1186 |
+| `fill_u64_gpu` | 1208 |
+| `fill_f32_gpu` | 1160 |
+| `fill_f64_gpu` | 1188 |
 
-The CPU fill converts floats in the same pass that stores the row. The GPU kernel stores each
-block from registers and has no shared-memory tile.
+The CPU fill converts floats in the same pass that stores the row. The 32-bit low word of each
+product is a plain vector multiply, and only the high word is a widening one: taking both from
+one 64-bit product made LLVM emit two widening multiplies. The bounded and normal fills do
+extra arithmetic per draw, so they run below the plain rate: the normals are limited by the
+vector pipes, not by memory. The GPU kernel stores each block from registers and has no
+shared-memory tile.
 
 ## AI assistance
 

@@ -1,11 +1,13 @@
 # Bounded integers and normals agree with the shared device core, and fills agree with scalar
 # draws. The fixed values come from tandem-c's cross-check headers, which it generates from
 # tandem-cuda's core.hpp. Run: mojo run -I tests -I . tests/test_derived.mojo
+from std.ffi import external_call
 from std.math import cos, log, sin, sqrt
 from std.memory.alloc import unsafe_alloc
 from std.testing import assert_equal, assert_true
 
-from tandem import PURPOSE_BELOW32, PURPOSE_BELOW64, Tandem
+from tandem import PURPOSE_BELOW32, PURPOSE_BELOW64, Tandem, normal2_f32, normal2_f64
+from tandem import seed
 from derived_data import (
     NORMAL_F32_END,
     NORMAL_F64_END,
@@ -21,6 +23,18 @@ from derived_data import (
     fill_below_u64_bounds,
     fill_below_u64_end,
     fill_below_u64_want,
+    cuda_below_u32_range,
+    cuda_below_u32_rejected,
+    cuda_below_u32_want,
+    cuda_below_u64_range,
+    cuda_below_u64_rejected,
+    cuda_below_u64_want,
+    cuda_normal_f32_n,
+    cuda_normal_f32_pos,
+    cuda_normal_f32_want,
+    cuda_normal_f64_n,
+    cuda_normal_f64_pos,
+    cuda_normal_f64_want,
     normal_f32,
     normal_f64,
 )
@@ -133,7 +147,10 @@ def test_bounded_fills_follow_the_definition() raises:
             var want = below_by_definition[32](rng, draws, UInt64(n))
             for i in range(count):
                 assert_equal(UInt64(got.unsafe_offset(i).unsafe_load()), want[i], String("u32 n=", n, " count=", count, " element ", i))
-            assert_true(rng == raw, "u32 consumes exactly count draws")
+            if count > 0:
+                assert_true(rng == raw, "u32 consumes exactly count draws")
+            else:
+                assert_true(rng == start(), "u32 empty fill moves nothing")
             got.unsafe_free()
             words.unsafe_free()
         for n in [0, 1, 3, 1_000_000_000_000, 0xC000000000000000]:
@@ -149,7 +166,10 @@ def test_bounded_fills_follow_the_definition() raises:
             var want = below_by_definition[64](rng, draws, UInt64(n))
             for i in range(count):
                 assert_equal(got.unsafe_offset(i).unsafe_load(), want[i], String("u64 n=", n, " count=", count, " element ", i))
-            assert_true(rng == raw, "u64 consumes exactly count draws")
+            if count > 0:
+                assert_true(rng == raw, "u64 consumes exactly count draws")
+            else:
+                assert_true(rng == start(), "u64 empty fill moves nothing")
             got.unsafe_free()
             words.unsafe_free()
 
@@ -241,6 +261,137 @@ def test_normal_fills_are_the_flattened_pairs() raises:
         got32.unsafe_free()
 
 
+def test_empty_bounded_and_normal_fills_move_nothing() raises:
+    """A bounded fill advances exactly its draws and a normal fill its pairs, so an empty one
+    does not even align the position."""
+    for p in [1, 5, 33, 65, 1001]:
+        var g = Tandem.from_key(seed(1), UInt64(p))
+        g.fill_below_u32(unsafe_alloc[UInt32](1), 0, 10)
+        g.fill_below_u64(unsafe_alloc[UInt64](1), 0, 10)
+        g.fill_normal_f64(unsafe_alloc[Float64](1), 0)
+        g.fill_normal_f32(unsafe_alloc[Float32](1), 0)
+        assert_equal(g.position(), UInt64(p))
+
+
+def test_fills_match_the_cuda_fixtures() raises:
+    """The fixtures of tandem-cuda: the key of seed 42, K = 32. The bounded fills hold 64 elements
+    from position 0, and the ranges near 2^31 and 2^63 reject, so the fallback generator runs.
+    The normal fills hold 33 elements from several positions, which cuts rows and pairs."""
+    var r32 = cuda_below_u32_range()
+    var rej32 = cuda_below_u32_rejected()
+    var w32 = cuda_below_u32_want()
+    var rejecting = 0
+    for c in range(len(r32)):
+        var g = Tandem.from_key(seed(42), 0)
+        var out = unsafe_alloc[UInt32](64)
+        g.fill_below_u32(out, 64, r32[c])
+        for i in range(64):
+            assert_equal(out.unsafe_offset(i).unsafe_load(), w32[64 * c + i], String("below_u32 range ", r32[c], " element ", i))
+        out.unsafe_free()
+        rejecting += rej32[c]
+    var r64 = cuda_below_u64_range()
+    var rej64 = cuda_below_u64_rejected()
+    var w64 = cuda_below_u64_want()
+    for c in range(len(r64)):
+        var g = Tandem.from_key(seed(42), 0)
+        var out = unsafe_alloc[UInt64](64)
+        g.fill_below_u64(out, 64, r64[c])
+        for i in range(64):
+            assert_equal(out.unsafe_offset(i).unsafe_load(), w64[64 * c + i], String("below_u64 range ", r64[c], " element ", i))
+        out.unsafe_free()
+        rejecting += rej64[c]
+    assert_true(rejecting > 0)
+
+    var pos = cuda_normal_f64_pos()
+    var n = cuda_normal_f64_n()
+    var want = cuda_normal_f64_want()
+    var base = 0
+    for c in range(len(pos)):
+        var g = Tandem.from_key(seed(42), pos[c])
+        var out = unsafe_alloc[Float64](n[c])
+        g.fill_normal_f64(out, n[c])
+        for i in range(n[c]):
+            var w = want[base + i]
+            assert_true(abs(out.unsafe_offset(i).unsafe_load() - w) <= 1e-12 * abs(w), String("normal f64 pos ", pos[c], " element ", i))
+        base += n[c]
+        out.unsafe_free()
+    var pos32 = cuda_normal_f32_pos()
+    var n32 = cuda_normal_f32_n()
+    var want32 = cuda_normal_f32_want()
+    base = 0
+    for c in range(len(pos32)):
+        var g = Tandem.from_key(seed(42), pos32[c])
+        var out = unsafe_alloc[Float32](n32[c])
+        g.fill_normal_f32(out, n32[c])
+        for i in range(n32[c]):
+            var w = want32[base + i]
+            assert_true(abs(out.unsafe_offset(i).unsafe_load() - w) <= 8.0 * 1.1920929e-07 * abs(w) + 1e-6, String("normal f32 pos ", pos32[c], " element ", i))
+        base += n32[c]
+        out.unsafe_free()
+
+
+def libm_normal2(a: Float64, b: Float64) -> SIMD[DType.float64, 2]:
+    var r = sqrt(-2.0 * external_call["log", Float64](1.0 - a))
+    var angle = 6.283185307179586 * b
+    return SIMD[DType.float64, 2](r * external_call["cos", Float64](angle), r * external_call["sin", Float64](angle))
+
+
+def test_series_against_libm() raises:
+    """The SIMD series against libm on 2^18 uniform pairs, including the ends of the range
+    where u = 1 - a is tiny or 1 and where cos or sin crosses zero."""
+    var g = Tandem(11)
+    var edges = [0.0, 1.1102230246251565e-16, 0.25, 0.5, 0.75, 0.9999999999999999, 0.125, 0.375]
+    var worst = Float64(0)
+    var worst32 = Float64(0)
+    for i in range(1 << 18):
+        var a = g.next_f64()
+        var b = g.next_f64()
+        if i < 64:
+            a = edges[i % 8]
+            b = edges[(i // 8) % 8]
+        var z = normal2_f64[1](SIMD[DType.float64, 1](a), SIMD[DType.float64, 1](b))
+        var want = libm_normal2(a, b)
+        # Relative above 1, absolute below: the libm reference rounds 2 pi b, which moves a zero of cos by 1e-16.
+        var e0 = abs(z[0][0] - want[0]) / max(abs(want[0]), 1.0)
+        var e1 = abs(z[1][0] - want[1]) / max(abs(want[1]), 1.0)
+        worst = max(worst, max(e0, e1))
+        var af = min(Float32(a), Float32(0.99999994))
+        var bf = Float32(b)
+        var z32 = normal2_f32[1](SIMD[DType.float32, 1](af), SIMD[DType.float32, 1](bf))
+        # The contract rounds u = 1 - a to f32, so the oracle starts from that u.
+        var w32 = libm_normal2(1.0 - Float64(Float32(1.0) - af), Float64(bf))
+        worst32 = max(worst32, max(abs(Float64(z32[0][0]) - w32[0]) / max(abs(w32[0]), 1.0), abs(Float64(z32[1][0]) - w32[1]) / max(abs(w32[1]), 1.0)))
+    assert_true(worst < 1e-13, String("f64 worst relative error ", worst))
+    assert_true(worst32 < 16.0 * 1.1920929e-07, String("f32 worst error ", worst32))
+
+
+def test_simd_fills_are_lane_independent() raises:
+    """Bounded and normal fills equal their scalar definitions at every length that cuts a
+    SIMD block, a draw block or a row, from an unaligned start."""
+    for count in [1, 7, 15, 16, 17, 31, 33, 255, 256, 257, 511, 513, 1023, 1024, 1025, 2049]:
+        for n in [1, 3, 1000, 0xC0000001]:
+            var a = start()
+            var b = start()
+            var got = unsafe_alloc[UInt32](count)
+            a.fill_below_u32(got, count, UInt32(n))
+            var raw = unsafe_alloc[UInt32](count)
+            b.fill_u32(raw, count)
+            var base = Tandem.from_key(a.key, 0, a.k)
+            for i in range(count):
+                var m = UInt64(raw.unsafe_offset(i).unsafe_load()) * UInt64(n)
+                var t = (UInt32(0) - UInt32(n)) % UInt32(n)
+                var want = UInt32(m >> 32)
+                if UInt32(m & 0xFFFFFFFF) < t:
+                    var r = base.sub(PURPOSE_BELOW32).split(UInt64(i))
+                    var q = UInt64(r.next_u32()) * UInt64(n)
+                    while UInt32(q & 0xFFFFFFFF) < t:
+                        q = UInt64(r.next_u32()) * UInt64(n)
+                    want = UInt32(q >> 32)
+                assert_equal(got.unsafe_offset(i).unsafe_load(), want, String("u32 count ", count, " n ", n, " element ", i))
+            got.unsafe_free()
+            raw.unsafe_free()
+
+
 def test_normals_have_unit_moments() raises:
     """Mean 0 and variance 1 to within 5 standard errors of 2^20 draws."""
     var n = 1 << 20
@@ -276,5 +427,9 @@ def main() raises:
     test_scalar_normal_is_the_cos_half()
     test_normal_f32_is_box_muller_of_two_f32_draws()
     test_normal_fills_are_the_flattened_pairs()
+    test_empty_bounded_and_normal_fills_move_nothing()
+    test_fills_match_the_cuda_fixtures()
+    test_series_against_libm()
+    test_simd_fills_are_lane_independent()
     test_normals_have_unit_moments()
     print("mojo derived: ok")

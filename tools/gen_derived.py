@@ -54,4 +54,20 @@ out.append(f"comptime NORMAL_F64_END: UInt64 = {end64}\n")
 out.append(reals("normal_f32", "Float32", normal, "CROSS_NORMALF"))
 end32 = re.search(r"CROSS_NORMALF_END_POS = (\d+)u", normal).group(1)
 out.append(f"comptime NORMAL_F32_END: UInt64 = {end32}")
-print("\n".join(out))
+
+# tandem-cuda's fill fixtures, which tandem-c carries as cuda_fill_*.h: key of seed 42, K = 32.
+cuda_below = read("cuda_fill_below.h")
+cuda_normal = read("cuda_fill_normal.h")
+for bits in (32, 64):
+    body = re.search(rf"CROSS_BELOW{bits}\[\] = \{{(.*?)\n\}};", cuda_below, re.S).group(1)
+    rows = re.findall(r"\{(\d+)u(?:ll)?,\s*(\d+),\s*\{([^}]*)\}\}", body)
+    out.append(ints(f"cuda_below_u{bits}_range", f"UInt{bits}", [r[0] for r in rows]))
+    out.append(ints(f"cuda_below_u{bits}_rejected", "Int", [r[1] for r in rows]))
+    out.append(ints(f"cuda_below_u{bits}_want", f"UInt{bits}", [v.strip().rstrip("ul") for r in rows for v in r[2].split(",")]))
+for bits, ty in ((64, "Float64"), (32, "Float32")):
+    body = re.search(rf"CROSS_NORMAL{bits}\[\] = \{{(.*?)\n\}};", cuda_normal, re.S).group(1)
+    rows = re.findall(r"\{(\d+)ull,\s*(\d+),\s*\{([^}]*)\}\}", body)
+    out.append(ints(f"cuda_normal_f{bits}_pos", "UInt64", [r[0] for r in rows]))
+    out.append(ints(f"cuda_normal_f{bits}_n", "Int", [r[1] for r in rows]))
+    out.append(f"def cuda_normal_f{bits}_want() -> List[{ty}]:\n    return [{', '.join(v.strip().rstrip('f') for r in rows for v in r[2].split(','))}]\n")
+print("\n".join(out).rstrip("\n"))
