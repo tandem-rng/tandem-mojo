@@ -180,16 +180,24 @@ def to_char(raw: UInt64) -> UInt32:
 
 
 # The libm functions, not std.math's: its Float64 log is off by 1e-10, which the other ports
-# do not reproduce.
-def box_muller(a: Float64, b: Float64) -> Float64:
-    """u = 1 - a lies in (0, 1], so the logarithm is finite."""
+# do not reproduce. The pair body stays out of line so that scalar draws and fills agree bit
+# for bit even where the compiler fuses cos and sin into one sincos call.
+@no_inline
+def box_muller2(a: Float64, b: Float64) -> SIMD[DType.float64, 2]:
+    """Both halves of a Box-Muller step, cos first. u = 1 - a lies in (0, 1], so the logarithm is finite."""
     var r = sqrt(-2.0 * external_call["log", Float64](1.0 - a))
-    return r * external_call["cos", Float64](6.283185307179586 * b)
+    var angle = 6.283185307179586 * b
+    return SIMD[DType.float64, 2](r * external_call["cos", Float64](angle), r * external_call["sin", Float64](angle))
 
 
-def box_muller_f32(a: Float32, b: Float32) -> Float32:
+@no_inline
+def box_muller2_f32(a: Float32, b: Float32) -> SIMD[DType.float32, 2]:
+    """The radius is f32. The angle goes through f64, because an f32 angle 2 pi b is off by up to 2 pi b 2^-24."""
     var r = sqrt(Float32(-2.0) * external_call["logf", Float32](Float32(1.0) - a))
-    return r * external_call["cosf", Float32](Float32(2.0) * Float32(3.14159265358979323846) * b)
+    var angle = 6.283185307179586 * Float64(b)
+    var c = Float32(external_call["cos", Float64](angle))
+    var sn = Float32(external_call["sin", Float64](angle))
+    return SIMD[DType.float32, 2](r * c, r * sn)
 
 
 struct Cursor(Copyable, Movable):
@@ -521,37 +529,56 @@ struct Tandem(Copyable, Movable, Equatable):
             if UInt64(m & 0xFFFFFFFFFFFFFFFF) >= t:
                 return UInt64(m >> 64)
 
-    def normal_f64(mut self) -> Float64:
-        """A standard normal by Box-Muller from two f64 draws."""
+    def normal2_f64(mut self) -> SIMD[DType.float64, 2]:
+        """Both normals of one Box-Muller step from two f64 draws, cos half first."""
         var a = self.next_f64()
-        return box_muller(a, self.next_f64())
+        return box_muller2(a, self.next_f64())
+
+    def normal2_f32(mut self) -> SIMD[DType.float32, 2]:
+        """Both normals of one Box-Muller step from two f32 draws, cos half first."""
+        var a = self.next_f32()
+        return box_muller2_f32(a, self.next_f32())
+
+    def normal_f64(mut self) -> Float64:
+        """A standard normal: the cos half of normal2_f64, which consumes both draws."""
+        return self.normal2_f64()[0]
 
     def normal_f32(mut self) -> Float32:
-        """A standard normal by Box-Muller in f32 from two f32 draws."""
-        var a = self.next_f32()
-        return box_muller_f32(a, self.next_f32())
+        """A standard normal: the cos half of normal2_f32, which consumes both draws."""
+        return self.normal2_f32()[0]
 
     def fill_normal_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int):
-        """Element i uses the f64 draws 2i and 2i + 1, as count calls to normal_f64 would."""
+        """The flattened sequence of normal2_f64 calls. An odd count keeps the cos half of its
+        last pair and still consumes both draws."""
         var draws = stack_allocation[256, Float64]()
         var done = 0
-        while done < count:
-            var m = min(128, count - done)
+        var pairs = count // 2 + count % 2
+        while pairs > 0:
+            var m = min(128, pairs)
             self.fill_f64(draws, 2 * m)
-            for i in range(m):
-                dst.unsafe_offset(done + i).unsafe_store(box_muller(draws.unsafe_offset(2 * i).unsafe_load(), draws.unsafe_offset(2 * i + 1).unsafe_load()))
-            done += m
+            for j in range(m):
+                var z = box_muller2(draws.unsafe_offset(2 * j).unsafe_load(), draws.unsafe_offset(2 * j + 1).unsafe_load())
+                dst.unsafe_offset(done).unsafe_store(z[0])
+                if done + 1 < count:
+                    dst.unsafe_offset(done + 1).unsafe_store(z[1])
+                done += 2
+            pairs -= m
 
     def fill_normal_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int):
-        """Element i uses the f32 draws 2i and 2i + 1, as count calls to normal_f32 would."""
+        """The flattened sequence of normal2_f32 calls, as fill_normal_f64."""
         var draws = stack_allocation[256, Float32]()
         var done = 0
-        while done < count:
-            var m = min(128, count - done)
+        var pairs = count // 2 + count % 2
+        while pairs > 0:
+            var m = min(128, pairs)
             self.fill_f32(draws, 2 * m)
-            for i in range(m):
-                dst.unsafe_offset(done + i).unsafe_store(box_muller_f32(draws.unsafe_offset(2 * i).unsafe_load(), draws.unsafe_offset(2 * i + 1).unsafe_load()))
-            done += m
+            for j in range(m):
+                var z = box_muller2_f32(draws.unsafe_offset(2 * j).unsafe_load(), draws.unsafe_offset(2 * j + 1).unsafe_load())
+                dst.unsafe_offset(done).unsafe_store(z[0])
+                if done + 1 < count:
+                    dst.unsafe_offset(done + 1).unsafe_store(z[1])
+                done += 2
+            pairs -= m
 
     # Derived generators --------------------------------------------------------------------
 

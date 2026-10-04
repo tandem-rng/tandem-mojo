@@ -1,7 +1,7 @@
 # Bounded integers and normals agree with the shared device core, and fills agree with scalar
 # draws. The fixed values come from tandem-c's cross-check headers, which it generates from
 # tandem-cuda's core.hpp. Run: mojo run -I tests -I . tests/test_derived.mojo
-from std.math import cos, log, sqrt
+from std.math import cos, log, sin, sqrt
 from std.memory.alloc import unsafe_alloc
 from std.testing import assert_equal, assert_true
 
@@ -167,56 +167,76 @@ def test_bounded_fill_without_rejection_is_the_scalar_draws() raises:
 
 
 def test_normal_matches_the_device_core() raises:
-    """The libraries differ in the last bits of log and cos so f64 matches to 1e-12 relative
-    and f32 to 8 ulps plus 1e-6, which covers the zeros of cos. The positions are exact."""
+    """The libraries differ in the last bits of log, cos and sin, so f64 matches to 1e-12
+    relative and f32 to 8 ulps plus 1e-6, which covers the zeros of cos. The positions are exact."""
     var want = normal_f64()
     var g = start()
-    for i in range(len(want)):
-        var z = g.normal_f64()
-        if abs(z - want[i]) > 1e-12 * abs(want[i]):
-            assert_true(False, String("normal_f64 element ", i, ": ", z, " against ", want[i]))
+    for i in range(len(want) // 2):
+        var z = g.normal2_f64()
+        for h in range(2):
+            if abs(z[h] - want[2 * i + h]) > 1e-12 * abs(want[2 * i + h]):
+                assert_true(False, String("normal2_f64 pair ", i, " half ", h, ": ", z[h], " against ", want[2 * i + h]))
     assert_equal(g.position(), NORMAL_F64_END)
     var want32 = normal_f32()
     g = start()
-    for i in range(len(want32)):
-        var z = g.normal_f32()
-        if abs(z - want32[i]) > 8.0 * 1.1920929e-07 * abs(want32[i]) + 1e-6:
-            assert_true(False, String("normal_f32 element ", i, ": ", z, " against ", want32[i]))
+    for i in range(len(want32) // 2):
+        var z = g.normal2_f32()
+        for h in range(2):
+            if abs(z[h] - want32[2 * i + h]) > 8.0 * 1.1920929e-07 * abs(want32[2 * i + h]) + 1e-6:
+                assert_true(False, String("normal2_f32 pair ", i, " half ", h, ": ", z[h], " against ", want32[2 * i + h]))
     assert_equal(g.position(), NORMAL_F32_END)
 
 
-def test_normal_f32_is_box_muller_of_two_f32_draws() raises:
-    """The oracle is the exact formula in f64 on the same two draws."""
-    var a = start()
-    var b = start()
-    for i in range(1000):
-        var got = Float64(a.normal_f32())
-        var u = Float64(b.next_f32())
-        var v = Float64(b.next_f32())
-        var want = sqrt(-2.0 * log(1.0 - u)) * cos(6.283185307179586 * v)
-        if abs(got - want) > 16.0 * 1.1920929e-07 * max(abs(want), 1.0):
-            assert_true(False, String("element ", i, ": ", got, " against ", want))
+def test_scalar_normal_is_the_cos_half() raises:
+    var a = Tandem(3)
+    var b = Tandem(3)
+    assert_equal(a.normal_f64(), b.normal2_f64()[0])
+    assert_true(a == b)
+    assert_equal(a.normal_f32(), b.normal2_f32()[0])
     assert_true(a == b)
 
 
-def test_normal_fills_are_scalar_draws() raises:
-    """Lengths cross the block of the normal fill and a row."""
-    for count in [0, 1, 127, 128, 129, 300, 1000]:
-        var a = Tandem(7)
-        var b = Tandem(7)
+def test_normal_f32_is_box_muller_of_two_f32_draws() raises:
+    """The oracle is the exact formula in f64 on the same two draws, for both halves."""
+    var a = start()
+    var b = start()
+    for i in range(1000):
+        var got = a.normal2_f32()
+        var u = Float64(b.next_f32())
+        var v = Float64(b.next_f32())
+        var r = sqrt(-2.0 * log(1.0 - u))
+        var want = SIMD[DType.float64, 2](r * cos(6.283185307179586 * v), r * sin(6.283185307179586 * v))
+        for h in range(2):
+            if abs(Float64(got[h]) - want[h]) > 16.0 * 1.1920929e-07 * max(abs(want[h]), 1.0):
+                assert_true(False, String("pair ", i, " half ", h, ": ", got[h], " against ", want[h]))
+    assert_true(a == b)
+
+
+def test_normal_fills_are_the_flattened_pairs() raises:
+    """Lengths cross the block of the normal fill and a row. An odd count keeps the cos half of
+    its last pair and consumes both draws."""
+    for count in [0, 1, 2, 3, 127, 128, 129, 257, 300, 513, 1000]:
+        var a = start()
+        var b = start()
         var got = unsafe_alloc[Float64](count + 1)
         a.fill_normal_f64(got, count)
-        for i in range(count):
-            assert_equal(got.unsafe_offset(i).unsafe_load(), b.normal_f64())
+        for i in range(count // 2 + count % 2):
+            var z = b.normal2_f64()
+            assert_equal(got.unsafe_offset(2 * i).unsafe_load(), z[0])
+            if 2 * i + 1 < count:
+                assert_equal(got.unsafe_offset(2 * i + 1).unsafe_load(), z[1])
         assert_true(a == b, String("normal_f64 position at ", count))
         got.unsafe_free()
 
-        a = Tandem(7)
-        b = Tandem(7)
+        a = start()
+        b = start()
         var got32 = unsafe_alloc[Float32](count + 1)
         a.fill_normal_f32(got32, count)
-        for i in range(count):
-            assert_equal(got32.unsafe_offset(i).unsafe_load(), b.normal_f32())
+        for i in range(count // 2 + count % 2):
+            var z = b.normal2_f32()
+            assert_equal(got32.unsafe_offset(2 * i).unsafe_load(), z[0])
+            if 2 * i + 1 < count:
+                assert_equal(got32.unsafe_offset(2 * i + 1).unsafe_load(), z[1])
         assert_true(a == b, String("normal_f32 position at ", count))
         got32.unsafe_free()
 
@@ -253,7 +273,8 @@ def main() raises:
     test_bounded_fills_follow_the_definition()
     test_bounded_fill_without_rejection_is_the_scalar_draws()
     test_normal_matches_the_device_core()
+    test_scalar_normal_is_the_cos_half()
     test_normal_f32_is_box_muller_of_two_f32_draws()
-    test_normal_fills_are_scalar_draws()
+    test_normal_fills_are_the_flattened_pairs()
     test_normals_have_unit_moments()
     print("mojo derived: ok")

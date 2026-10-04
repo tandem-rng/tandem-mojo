@@ -5,7 +5,7 @@ Prototype of [Tandem8x32](https://github.com/tandem-rng/spec) in Mojo, in one fi
 every specification type, CPU fills over eight SIMD lanes for every width and float type, and a
 GPU row fill with one thread per chunk for u32, u64, f32 and f64. It produces the stream the
 specification defines, bit for bit. Bounded integers (`below_u32`, `below_u64`) and standard
-normals (`normal_f64`, `normal_f32`) with fills follow the shared device core in `tandem-cuda`.
+normals (`normal_f64`, `normal_f32`, and the pairs `normal2_*`) with fills follow the shared device core in `tandem-cuda`.
 
 ```sh
 pixi install          # Mojo 1.1 and MAX 26.6 from the Modular conda channel
