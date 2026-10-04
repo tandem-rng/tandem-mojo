@@ -1,8 +1,53 @@
-# tandem-mojo notes
+# API
 
-Detail moved out of the README. Sections follow the README headings.
+```mojo
+from std.memory.alloc import unsafe_alloc
+from tandem import Tandem
+
+def main() raises:
+    var rng = Tandem(42)                       # 128-bit seed, default K
+    var x = rng.next_f64()
+    var words = unsafe_alloc[UInt32](1 << 20)
+    rng.fill_u32(words, 1 << 20)
+    var i = rng.below_u32(10)                  # uniform in 0..10, Lemire
+    var z = rng.normal_f64()                   # Box-Muller from two f64 draws
+    var e = rng.exponential_f64()              # -log(1 - u), one f64 draw
+    var worker = rng.split(7)                  # by index, from the key alone
+    var kids = rng.fork(4)                     # from the current block, parent moves on
+```
+
+```mojo
+from max.gpu.host import DeviceContext
+from tandem import fill_f64_gpu, seed
+
+var ctx = DeviceContext()
+var dev = ctx.enqueue_create_buffer[DType.float64](1 << 24)
+fill_f64_gpu(ctx, seed(42), 0, (1 << 24) // 16, 32, dev.unsafe_ptr())   # rows 0 to 2^20
+```
 
 ## What it provides
+
+- `Tandem`: a generator with a 128-bit key, 64-bit bit position and chunk length `K`.
+  `Tandem(seed)` and `Tandem.from_key` raise when `K` is not a power of two in 1 to 65536.
+- Scalar draws of every specification type: `Bool`, 8 to 128-bit integers, `Float32`,
+  `Float64`, binary16 as `UInt16`, `char` as `UInt32`, complex `Float16`, `Float32`, `Float64`.
+- `at_*` for random access, `split`, `fork`, `sub`, `from_key`.
+- CPU fills for every type: `fill_u8` to `fill_u128`, `fill_i8` to `fill_i128`, `fill_f32`,
+  `fill_f64`, `fill_f16_bits`, `fill_char`, `fill_bool`, `fill_c16_bits`, `fill_c32`,
+  `fill_c64`. Each equals the scalar draws it replaces.
+- `below_u32`, `below_u64`, `fill_below_u32`, `fill_below_u64`. A fill cut into chunks equals
+  the whole fill.
+- `normal_f64`, `normal_f32`, `normal2_f64`, `normal2_f32` and `fill_normal_*`. They are byte
+  identical to tandem-c.
+- `exponential_f64`, `exponential_f32`, `fill_exponential_f64`, `fill_exponential_f32`. They
+  are byte identical to tandem-c.
+- GPU fills `fill_u32_gpu`, `fill_u64_gpu`, `fill_f32_gpu`, `fill_f64_gpu`. They take a key
+  and a row range, write whole rows and agree with the CPU fill from bit position
+  `1024 * first_row`.
+- Parallel use: element `i` of a fill is draw `i`, so any decomposition reproduces a serial run.
+  See [Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative).
+
+## Design
 
 - A `Tandem` is its transport form (128-bit key, 64-bit bit position, chunk length `K`) plus a
   cache of the current 1024-bit row.
@@ -33,7 +78,7 @@ Detail moved out of the README. Sections follow the README headings.
   and in `f32` from `f32` draws, so the bytes equal `tandem-c`'s (FNV-1a `47f8f98297d94ee2`
   over 1e6 values of each width from five positions).
 
-## Use
+## Positions and fills
 
 `Tandem(seed)` and `Tandem.from_key` raise when `K` is not a power of two in 1 to 65536.
 Every draw aligns the position to the width of its type first, and every fill returns the
@@ -50,42 +95,3 @@ var raw = Tandem.from_key(rng.key, rng.position(), rng.k)
 `[first_row, first_row + nrows)`, of 32, 16, 32 and 16 values, so a GPU fill and a CPU fill
 from bit position `1024 * first_row` agree. The GPU fills take a key and a row range, not a
 `Tandem`, and do not move a position.
-
-## Tests
-
-- `tests/test_vectors.mojo` checks every vector of the specification.
-  `tests/vectors_data.mojo` is generated from the spec repository's `vectors.json` by
-  `tools/gen_vectors.py`.
-- `tests/test_dumps.mojo` compares long fills, scalar draws and random access with the
-  reference stream dumps in `tests/data`, complex fills included. The dumps are copies of
-  `tandem-c/tests/data`.
-- `tests/test_tandem.mojo` covers scalar draws of every width, alignment, random access,
-  `set_position`, chunk lengths, split, sub and fork.
-- `tests/test_fills.mojo` compares every fill with the scalar draws of its type, at chunk
-  lengths, offsets and lengths that cut rows and chunks, and checks the position afterwards.
-- `tests/test_derived.mojo` compares bounded integers and normals with the cross-check values
-  of `tandem-c`, which it generates from the `tandem-cuda` core, and the bounded and normal
-  fills with the fill fixtures of `tandem-cuda` that `tandem-c` carries
-  (`tools/gen_derived.py` converts both), the bounded ones from the starts 0, 1 and 12345 bits.
-  It checks the bounded fills against their definition, at every length that cuts a SIMD block,
-  and cut into chunks against the whole fill with rejections. It checks the normal fills against
-  the flattened pairs, the series against libm over 2^18 pairs and the edges of the range, the
-  hash of 1e6 pairs from five positions against the value of `tandem-c`, the moments of the
-  normals, and that an empty fill moves nothing. It checks the exponentials against
-  `tandem-c`'s `cross_exponential.h` bit for bit, the hash of 1e6 values of each width from
-  five positions, fills cut across the L1 block against the whole fill and the scalar draws,
-  that an empty fill moves nothing, and the moments to the fourth order and the KS distance of
-  1e7 draws of each width against Exp(1).
-- `tests/test_gpu.mojo` compares the GPU fills with the CPU fills over chunk lengths and row
-  ranges, and with the dump.
-
-## Speed
-
-GPU fills: 1 GiB per fill, minimum of 21 after a half-second warm-up, GPU idle.
-
-The CPU fill converts floats in the same pass that stores the row. The 32-bit low word of each
-product is a plain vector multiply, and only the high word is a widening one: taking both from
-one 64-bit product made LLVM emit two widening multiplies. The bounded and normal fills do
-extra arithmetic per draw, so they run below the plain rate: the normals are limited by the
-vector pipes, not by memory. The GPU kernel stores each block from registers and has no
-shared-memory tile.
