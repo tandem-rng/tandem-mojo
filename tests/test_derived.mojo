@@ -145,8 +145,9 @@ def below_by_definition[bits: Int](rng: Tandem, raw: List[UInt64], n: UInt64, fi
 
 
 def test_bounded_fills_follow_the_definition() raises:
-    """Bounds near 2^32 and 2^64 reject a quarter of the draws, so the retry runs."""
-    for count in [0, 1, 31, 32, 33, 1000, 5000]:
+    """Bounds near 2^32 and 2^64 reject a quarter of the draws, so the retry runs. The lengths
+    cut the SIMD block, the draw block and a row from an unaligned start."""
+    for count in [0, 1, 7, 15, 16, 17, 31, 32, 33, 255, 256, 257, 1023, 1024, 1025, 2049, 5000]:
         for n in [0, 1, 3, 1000, 0xC0000000]:
             var rng = start()
             var raw = start()
@@ -199,24 +200,21 @@ def test_bounded_fill_without_rejection_is_the_scalar_draws() raises:
     got.unsafe_free()
 
 
-def test_normal_matches_the_device_core() raises:
-    """The libraries differ in the last bits of log, cos and sin, so f64 matches to 1e-12
-    relative and f32 to 8 ulps plus 1e-6, which covers the zeros of cos. The positions are exact."""
+def test_normal_matches_tandem_c() raises:
+    """The values of tandem-c's cross_normal.h bit for bit, and its end positions."""
     var want = normal_f64()
     var g = start()
     for i in range(len(want) // 2):
         var z = g.normal2_f64()
         for h in range(2):
-            if abs(z[h] - want[2 * i + h]) > 1e-12 * abs(want[2 * i + h]):
-                assert_true(False, String("normal2_f64 pair ", i, " half ", h, ": ", z[h], " against ", want[2 * i + h]))
+            assert_equal(z[h], want[2 * i + h], String("normal2_f64 pair ", i, " half ", h))
     assert_equal(g.position(), NORMAL_F64_END)
     var want32 = normal_f32()
     g = start()
     for i in range(len(want32) // 2):
         var z = g.normal2_f32()
         for h in range(2):
-            if abs(z[h] - want32[2 * i + h]) > 8.0 * 1.1920929e-07 * abs(want32[2 * i + h]) + 1e-6:
-                assert_true(False, String("normal2_f32 pair ", i, " half ", h, ": ", z[h], " against ", want32[2 * i + h]))
+            assert_equal(z[h], want32[2 * i + h], String("normal2_f32 pair ", i, " half ", h))
     assert_equal(g.position(), NORMAL_F32_END)
 
 
@@ -376,33 +374,6 @@ def test_series_against_libm() raises:
         worst32 = max(worst32, max(abs(Float64(z32[0][0]) - w32[0]) / max(abs(w32[0]), 1.0), abs(Float64(z32[1][0]) - w32[1]) / max(abs(w32[1]), 1.0)))
     assert_true(worst < 1e-13, String("f64 worst relative error ", worst))
     assert_true(worst32 < 16.0 * 1.1920929e-07, String("f32 worst error ", worst32))
-
-
-def test_simd_fills_are_lane_independent() raises:
-    """Bounded and normal fills equal their scalar definitions at every length that cuts a
-    SIMD block, a draw block or a row, from an unaligned start."""
-    for count in [1, 7, 15, 16, 17, 31, 33, 255, 256, 257, 511, 513, 1023, 1024, 1025, 2049]:
-        for n in [1, 3, 1000, 0xC0000001]:
-            var a = start()
-            var b = start()
-            var got = unsafe_alloc[UInt32](count)
-            a.fill_below_u32(got, count, UInt32(n))
-            var raw = unsafe_alloc[UInt32](count)
-            b.fill_u32(raw, count)
-            var base = Tandem.from_key(a.key, 0, a.k)
-            for i in range(count):
-                var m = UInt64(raw.unsafe_offset(i).unsafe_load()) * UInt64(n)
-                var t = (UInt32(0) - UInt32(n)) % UInt32(n)
-                var want = UInt32(m >> 32)
-                if UInt32(m & 0xFFFFFFFF) < t:
-                    var r = base.sub(PURPOSE_BELOW32).split(UInt64(1 + i))
-                    var q = UInt64(r.next_u32()) * UInt64(n)
-                    while UInt32(q & 0xFFFFFFFF) < t:
-                        q = UInt64(r.next_u32()) * UInt64(n)
-                    want = UInt32(q >> 32)
-                assert_equal(got.unsafe_offset(i).unsafe_load(), want, String("u32 count ", count, " n ", n, " element ", i))
-            got.unsafe_free()
-            raw.unsafe_free()
 
 
 def test_cut_bounded_fills_equal_the_whole_fill() raises:
@@ -641,14 +612,13 @@ def main() raises:
     test_bound_zero_returns_zero_after_one_draw()
     test_bounded_fills_follow_the_definition()
     test_bounded_fill_without_rejection_is_the_scalar_draws()
-    test_normal_matches_the_device_core()
+    test_normal_matches_tandem_c()
     test_scalar_normal_is_the_cos_half()
     test_normal_f32_is_box_muller_of_two_f32_draws()
     test_normal_fills_are_the_flattened_pairs()
     test_empty_bounded_and_normal_fills_move_nothing()
     test_fills_match_the_cuda_fixtures()
     test_series_against_libm()
-    test_simd_fills_are_lane_independent()
     test_cut_bounded_fills_equal_the_whole_fill()
     test_normal_fills_have_the_bytes_of_tandem_c()
     test_normals_have_unit_moments()
