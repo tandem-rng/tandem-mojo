@@ -915,35 +915,32 @@ def store_row[kind: Int, W: Int, T: DType](words: Row, dst: Pointer[Scalar[T], M
 
 def fill_rows[kind: Int, W: Int, T: DType](mut cur: Cursor, key: SIMD[DType.uint32, 4], K: UInt32, p: UInt64, n: Int, dst: Pointer[Scalar[T], MutAnyOrigin]):
     """Write n elements of W bits from the W-aligned bit position p, row by row. A row that the
-    fill covers entirely goes straight to dst. The first and last row go through a scratch row."""
+    fill covers entirely goes straight to dst. The first and last row go through a scratch row.
+    Rows and offsets stay unsigned, because a 1-bit element index passes 2^63."""
     comptime per_row = 1024 // W
-    var first_el = Int(p // UInt64(W))
-    var end = first_el + n
-    var row = first_el // per_row
-    var last_row = (end + per_row - 1) // per_row
+    var row = p >> 10
+    var lo = Int((p & 1023) // UInt64(W))
     var c = cur.copy()
     var scratch = stack_allocation[per_row, Scalar[T]]()
     var i = 0
-    while row < last_row:
-        c.seek(key, K, UInt64(row))
+    while i < n:
+        c.seek(key, K, row)
         var words = row_words(c.lanes)
-        var first = row * per_row
-        if first >= first_el and first + per_row <= end:
+        if lo == 0 and n - i >= per_row:
             store_row[kind, W, T](words, dst.unsafe_offset(i))
             i += per_row
         else:
             store_row[kind, W, T](words, scratch.unsafe_origin_cast[MutAnyOrigin]())
-            var lo = max(first_el, first) - first
-            var hi = min(end, first + per_row) - first
-            for j in range(lo, hi):
+            for j in range(lo, min(per_row, lo + n - i)):
                 dst.unsafe_offset(i).unsafe_store(scratch.unsafe_offset(j).unsafe_load())
                 i += 1
+            lo = 0
         row += 1
     cur = c^
 
 
 @always_inline
-def below_row_u64(words: Row, dst: Pointer[UInt64, MutAnyOrigin], bound: UInt64, thresh: UInt64, key: SIMD[DType.uint32, 4], K: UInt32, first_element: Int):
+def below_row_u64(words: Row, dst: Pointer[UInt64, MutAnyOrigin], bound: UInt64, thresh: UInt64, key: SIMD[DType.uint32, 4], K: UInt32, first_draw: UInt64):
     """The 16 bounded values of one row. The row goes through L1 so that the scalar multiplies
     run on the integer pipes while the vector pipes generate the next row. A scalar umulh per
     element beats a lane-wise emulation. The rejection tests are ORed, and only a row with a
@@ -958,31 +955,28 @@ def below_row_u64(words: Row, dst: Pointer[UInt64, MutAnyOrigin], bound: UInt64,
     if any != 0:
         for k in range(16):
             if UInt64(UInt128(raw.unsafe_offset(k).unsafe_load()) * UInt128(bound) & 0xFFFFFFFFFFFFFFFF) < thresh:
-                dst.unsafe_offset(k).unsafe_store(below_retry_u64(key, K, bound, UInt64(first_element + k)))
+                dst.unsafe_offset(k).unsafe_store(below_retry_u64(key, K, bound, first_draw + UInt64(k)))
 
 
 def fill_rows_below_u64(mut cur: Cursor, key: SIMD[DType.uint32, 4], K: UInt32, p: UInt64, n: Int, dst: Pointer[UInt64, MutAnyOrigin], bound: UInt64, thresh: UInt64):
     """fill_rows for the bounded u64 fill: element i of the fill is stream element i, bounded."""
-    var first_el = Int(p // 64)
-    var end = first_el + n
-    var row = first_el // 16
-    var last_row = (end + 15) // 16
+    var row = p >> 10
+    var lo = Int((p & 1023) // 64)
     var c = cur.copy()
     var scratch = stack_allocation[16, UInt64]()
     var i = 0
-    while row < last_row:
-        c.seek(key, K, UInt64(row))
+    while i < n:
+        c.seek(key, K, row)
         var words = row_words(c.lanes)
-        var first = row * 16
-        if first >= first_el and first + 16 <= end:
-            below_row_u64(words, dst.unsafe_offset(i), bound, thresh, key, K, first_el + i)
+        if lo == 0 and n - i >= 16:
+            below_row_u64(words, dst.unsafe_offset(i), bound, thresh, key, K, row * 16)
             i += 16
         else:
-            var lo = max(first_el, first) - first
-            below_row_u64(words, scratch.unsafe_origin_cast[MutAnyOrigin](), bound, thresh, key, K, first_el + i - lo)
-            for j in range(lo, min(end, first + 16) - first):
+            below_row_u64(words, scratch.unsafe_origin_cast[MutAnyOrigin](), bound, thresh, key, K, row * 16)
+            for j in range(lo, min(16, lo + n - i)):
                 dst.unsafe_offset(i).unsafe_store(scratch.unsafe_offset(j).unsafe_load())
                 i += 1
+            lo = 0
         row += 1
     cur = c^
 

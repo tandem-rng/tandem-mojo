@@ -25,8 +25,9 @@ def lengths() -> List[Int]:
     return [0, 1, 2, 31, 32, 33, 127, 128, 129, 500, 1031]
 
 
-def starts() -> List[Int]:
-    return [0, 1, 7, 33, 100, 1000, 1023, 1024, 5000]
+def starts() -> List[UInt64]:
+    """The last two pass 2^63, where a 1-bit element index leaves the range of Int."""
+    return [0, 1, 7, 33, 100, 1000, 1023, 1024, 5000, (1 << 63) + 5, (1 << 64) - (1 << 17)]
 
 
 def chunks() -> List[Int]:
@@ -54,7 +55,7 @@ def check[kind: Int, W: Int, T: DType](label: String) raises:
     for k in chunks():
         for start in starts():
             for n in lengths():
-                var a = Tandem.from_key(KEY, UInt64(start), UInt32(k))
+                var a = Tandem.from_key(KEY, start, UInt32(k))
                 var b = a.copy()
                 var buf = unsafe_alloc[Scalar[T]](n + 1)
                 var guard = Scalar[T](0) - 1 if T.is_integral() else Scalar[T](7)
@@ -93,7 +94,7 @@ def test_wide_and_complex_fills() raises:
     """A 128-bit fill is the 128-bit draws and a complex fill is the real fill of twice the length."""
     for start in starts():
         for n in [0, 1, 7, 8, 9, 70]:
-            var a = Tandem.from_key(KEY, UInt64(start))
+            var a = Tandem.from_key(KEY, start)
             var b = a.copy()
             var wide = unsafe_alloc[UInt128](n + 1)
             a.fill_u128(wide, n)
@@ -102,7 +103,7 @@ def test_wide_and_complex_fills() raises:
             if n > 0:
                 assert_true(a == b, String("u128 position start=", start, " n=", n))
             var signed = unsafe_alloc[Int128](n + 1)
-            a = Tandem.from_key(KEY, UInt64(start))
+            a = Tandem.from_key(KEY, start)
             b = a.copy()
             a.fill_i128(signed, n)
             for i in range(n):
@@ -111,7 +112,7 @@ def test_wide_and_complex_fills() raises:
             signed.unsafe_free()
 
             var c64 = unsafe_alloc[Float64](2 * n + 1)
-            a = Tandem.from_key(KEY, UInt64(start))
+            a = Tandem.from_key(KEY, start)
             b = a.copy()
             a.fill_c64(c64, n)
             for i in range(n):
@@ -121,7 +122,7 @@ def test_wide_and_complex_fills() raises:
             c64.unsafe_free()
 
             var c32 = unsafe_alloc[Float32](2 * n + 1)
-            a = Tandem.from_key(KEY, UInt64(start))
+            a = Tandem.from_key(KEY, start)
             b = a.copy()
             a.fill_c32(c32, n)
             for i in range(n):
@@ -131,7 +132,7 @@ def test_wide_and_complex_fills() raises:
             c32.unsafe_free()
 
             var c16 = unsafe_alloc[UInt16](2 * n + 1)
-            a = Tandem.from_key(KEY, UInt64(start))
+            a = Tandem.from_key(KEY, start)
             b = a.copy()
             a.fill_c16_bits(c16, n)
             for i in range(n):
