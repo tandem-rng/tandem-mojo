@@ -45,6 +45,8 @@ fill_f64_gpu(ctx, seed(42), 0, (1 << 24) // 16, 32, dev.unsafe_ptr())   # rows 0
 
 ## What it provides
 
+Design, test and speed detail: [docs/notes.md](docs/notes.md).
+
 - `Tandem`: a generator with a 128-bit key, 64-bit bit position and chunk length `K`.
   `Tandem(seed)` and `Tandem.from_key` raise when `K` is not a power of two in 1 to 65536.
 - Scalar draws of every specification type: `Bool`, 8 to 128-bit integers, `Float32`,
