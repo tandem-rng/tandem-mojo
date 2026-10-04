@@ -2,8 +2,9 @@
 # draws. The fixed values come from tandem-c's cross-check headers, which it generates from
 # tandem-cuda's core.hpp. Run: mojo run -I tests -I . tests/test_derived.mojo
 from std.ffi import external_call
-from std.math import cos, log, sin, sqrt
+from std.math import cos, exp, log, sin, sqrt
 from std.memory.alloc import unsafe_alloc
+from std.builtin.sort import sort
 from std.testing import assert_equal, assert_true
 
 from tandem import PURPOSE_BELOW32, PURPOSE_BELOW64, Tandem, normal2_f32, normal2_f64
@@ -37,6 +38,12 @@ from derived_data import (
     cuda_normal_f64_n,
     cuda_normal_f64_pos,
     cuda_normal_f64_want,
+    exponential_f32_end,
+    exponential_f32_starts,
+    exponential_f32_want,
+    exponential_f64_end,
+    exponential_f64_starts,
+    exponential_f64_want,
     normal_f32,
     normal_f64,
 )
@@ -482,6 +489,152 @@ def test_normals_have_unit_moments() raises:
     y.unsafe_free()
 
 
+def test_exponentials_have_the_bytes_of_tandem_c() raises:
+    """The fixture of tandem-c's tests/cross_exponential.h, bit for bit: a fill of 64 from five
+    positions of the key of seed 42 and the scalar draws agree with it and with each other."""
+    var starts = exponential_f64_starts()
+    var want = exponential_f64_want()
+    var end = exponential_f64_end()
+    for c in range(len(starts)):
+        var a = Tandem.from_key(seed(42), starts[c])
+        var b = a.copy()
+        var got = unsafe_alloc[Float64](64)
+        a.fill_exponential_f64(got, 64)
+        for i in range(64):
+            assert_equal(got.unsafe_offset(i).unsafe_load(), want[64 * c + i], String("f64 fill start ", starts[c], " element ", i))
+            assert_equal(b.exponential_f64(), want[64 * c + i], String("f64 draw start ", starts[c], " element ", i))
+        assert_equal(a.position(), end[c])
+        assert_equal(b.position(), end[c])
+        got.unsafe_free()
+    var starts32 = exponential_f32_starts()
+    var want32 = exponential_f32_want()
+    var end32 = exponential_f32_end()
+    for c in range(len(starts32)):
+        var a = Tandem.from_key(seed(42), starts32[c])
+        var b = a.copy()
+        var got = unsafe_alloc[Float32](64)
+        a.fill_exponential_f32(got, 64)
+        for i in range(64):
+            assert_equal(got.unsafe_offset(i).unsafe_load(), want32[64 * c + i], String("f32 fill start ", starts32[c], " element ", i))
+            assert_equal(b.exponential_f32(), want32[64 * c + i], String("f32 draw start ", starts32[c], " element ", i))
+        assert_equal(a.position(), end32[c])
+        assert_equal(b.position(), end32[c])
+        got.unsafe_free()
+
+
+def test_exponential_fills_have_the_hash_of_tandem_c() raises:
+    """The FNV-1a hash of 1e6 f64 then 1e6 f32 exponentials from five positions, the value that
+    tandem-c's tests/test_exponential_bits.c records."""
+    comptime N = 1000000
+    var starts: List[UInt64] = [0, 1, 77, 12345, 1 << 30]
+    var d = unsafe_alloc[Float64](N)
+    var f = unsafe_alloc[Float32](N)
+    var h = UInt64(0xCBF29CE484222325)
+    for s in starts:
+        var g = Tandem(UInt128(2026) | (UInt128(7) << 64))
+        g.set_position(s)
+        g.fill_exponential_f64(d, N)
+        var bytes = d.unsafe_bitcast[UInt8]()
+        for i in range(N * 8):
+            h = (h ^ UInt64(bytes.unsafe_offset(i).unsafe_load())) * 0x100000001B3
+        g.fill_exponential_f32(f, N)
+        var bytes32 = f.unsafe_bitcast[UInt8]()
+        for i in range(N * 4):
+            h = (h ^ UInt64(bytes32.unsafe_offset(i).unsafe_load())) * 0x100000001B3
+    d.unsafe_free()
+    f.unsafe_free()
+    assert_equal(h, UInt64(0x47F8F98297D94EE2))
+
+
+def test_cut_exponential_fills_equal_the_whole_fill() raises:
+    """Fills cut across the L1 block and at positions off a draw boundary equal the whole fill
+    and the scalar draws, and leave the generator where they leave it."""
+    var cuts = [0, 1, 17, 18, 1025, 2000, 3000]
+    var whole = unsafe_alloc[Float64](3000)
+    var cut = unsafe_alloc[Float64](3000)
+    var a = Tandem.from_key(seed(42), 12345)
+    var b = a.copy()
+    var c = a.copy()
+    a.fill_exponential_f64(whole, 3000)
+    for k in range(len(cuts) - 1):
+        b.fill_exponential_f64(cut.unsafe_offset(cuts[k]), cuts[k + 1] - cuts[k])
+    for i in range(3000):
+        assert_equal(cut.unsafe_offset(i).unsafe_load(), whole.unsafe_offset(i).unsafe_load(), String("f64 element ", i))
+        assert_equal(c.exponential_f64(), whole.unsafe_offset(i).unsafe_load(), String("f64 draw ", i))
+    assert_true(a == b)
+    assert_true(a == c)
+    whole.unsafe_free()
+    cut.unsafe_free()
+    var whole32 = unsafe_alloc[Float32](3000)
+    var cut32 = unsafe_alloc[Float32](3000)
+    var d = Tandem.from_key(seed(42), 12345)
+    var e = d.copy()
+    var f = d.copy()
+    d.fill_exponential_f32(whole32, 3000)
+    for k in range(len(cuts) - 1):
+        e.fill_exponential_f32(cut32.unsafe_offset(cuts[k]), cuts[k + 1] - cuts[k])
+    for i in range(3000):
+        assert_equal(cut32.unsafe_offset(i).unsafe_load(), whole32.unsafe_offset(i).unsafe_load(), String("f32 element ", i))
+        assert_equal(f.exponential_f32(), whole32.unsafe_offset(i).unsafe_load(), String("f32 draw ", i))
+    assert_true(d == e)
+    assert_true(d == f)
+    whole32.unsafe_free()
+    cut32.unsafe_free()
+
+
+def test_empty_exponential_fills_move_nothing() raises:
+    for p in [1, 5, 33, 65, 1001]:
+        var g = Tandem.from_key(seed(1), UInt64(p))
+        g.fill_exponential_f64(unsafe_alloc[Float64](1), 0)
+        g.fill_exponential_f32(unsafe_alloc[Float32](1), 0)
+        assert_equal(g.position(), UInt64(p))
+
+
+def check_exp1[T: DType](mut x: List[Scalar[T]]) raises:
+    """Raw moments 1 to 4 within 5 standard errors of k!, and the Kolmogorov distance within the
+    0.1% critical value."""
+    var n = len(x)
+    var fact = [1.0, 2.0, 6.0, 24.0]
+    var fact2 = [2.0, 24.0, 720.0, 40320.0]
+    var sums = [Float64(0), Float64(0), Float64(0), Float64(0)]
+    for i in range(n):
+        var v = Float64(x[i])
+        var q = v
+        for k in range(4):
+            sums[k] += q
+            q *= v
+    for k in range(4):
+        var se = sqrt((fact2[k] - fact[k] * fact[k]) / Float64(n))
+        assert_true(abs(sums[k] / Float64(n) - fact[k]) < 5.0 * se, String("moment ", k + 1, ": ", sums[k] / Float64(n)))
+    sort(x)
+    var dmax = Float64(0)
+    for i in range(n):
+        var cdf = 1.0 - exp(-Float64(x[i]))
+        dmax = max(dmax, max(abs(Float64(i + 1) / Float64(n) - cdf), abs(Float64(i) / Float64(n) - cdf)))
+    assert_true(dmax < 1.9495 / sqrt(Float64(n)), String("KS distance ", dmax))
+
+
+def test_exponentials_are_exp1() raises:
+    """1e7 draws of each width: moments to the fourth order and the KS distance to 1 - exp(-x)."""
+    var n = 10_000_000
+    var d = unsafe_alloc[Float64](n)
+    var g = Tandem(7)
+    g.fill_exponential_f64(d, n)
+    var xd = List[Float64](length=n, fill=0.0)
+    for i in range(n):
+        xd[i] = d.unsafe_offset(i).unsafe_load()
+    d.unsafe_free()
+    check_exp1[DType.float64](xd)
+    var f = unsafe_alloc[Float32](n)
+    g = Tandem(7)
+    g.fill_exponential_f32(f, n)
+    var xf = List[Float32](length=n, fill=0.0)
+    for i in range(n):
+        xf[i] = f.unsafe_offset(i).unsafe_load()
+    f.unsafe_free()
+    check_exp1[DType.float32](xf)
+
+
 def main() raises:
     test_below_matches_the_device_core()
     test_fill_below_matches_the_device_core()
@@ -499,4 +652,9 @@ def main() raises:
     test_cut_bounded_fills_equal_the_whole_fill()
     test_normal_fills_have_the_bytes_of_tandem_c()
     test_normals_have_unit_moments()
+    test_exponentials_have_the_bytes_of_tandem_c()
+    test_exponential_fills_have_the_hash_of_tandem_c()
+    test_cut_exponential_fills_equal_the_whole_fill()
+    test_empty_exponential_fills_move_nothing()
+    test_exponentials_are_exp1()
     print("mojo derived: ok")

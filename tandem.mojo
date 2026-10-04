@@ -787,6 +787,55 @@ struct Tandem(Copyable, Movable, Equatable):
                         done += 1
             pairs -= m
 
+    # Exponentials --------------------------------------------------------------------------
+    # -log(1 - u) of one uniform draw per element. Halving -2 log is exact, so the bits are
+    # those of tandem-c.
+
+    def exponential_f64(mut self) -> Float64:
+        """An Exp(1) draw from one f64 draw."""
+        return 0.5 * neg2_log_f64[1](SIMD[DType.float64, 1](self.next_f64()))[0]
+
+    def exponential_f32(mut self) -> Float32:
+        """An Exp(1) draw from one f32 draw, computed in f32."""
+        return 0.5 * neg2_log_f32[1](SIMD[DType.float32, 1](self.next_f32()))[0]
+
+    def fill_exponential_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int):
+        """Element i is exponential_f64 of draw i. The uniforms go into the output in blocks
+        that stay in L1 for the in-place map."""
+        comptime W = 8
+        comptime BLOCK = 1024
+        var done = 0
+        while done < count:
+            var m = min(BLOCK, count - done)
+            var p = dst.unsafe_offset(done)
+            self.fill_f64(p, m)
+            var j = 0
+            while j + W <= m:
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f64[W](p.unsafe_offset(j).unsafe_load[width=W]()))
+                j += W
+            while j < m:
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f64[1](p.unsafe_offset(j).unsafe_load[width=1]()))
+                j += 1
+            done += m
+
+    def fill_exponential_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int):
+        """The f32 form of fill_exponential_f64."""
+        comptime W = 16
+        comptime BLOCK = 1024
+        var done = 0
+        while done < count:
+            var m = min(BLOCK, count - done)
+            var p = dst.unsafe_offset(done)
+            self.fill_f32(p, m)
+            var j = 0
+            while j + W <= m:
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[W](p.unsafe_offset(j).unsafe_load[width=W]()))
+                j += W
+            while j < m:
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[1](p.unsafe_offset(j).unsafe_load[width=1]()))
+                j += 1
+            done += m
+
     # Derived generators --------------------------------------------------------------------
 
     def split(self, index: UInt64) -> Self:

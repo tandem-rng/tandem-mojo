@@ -36,6 +36,12 @@ the specification defines, bit for bit. The whole port is one file, `tandem.mojo
   `f32` normal runs in `f32`. The bounded fills do the multiply-high and the compare on SIMD
   lanes (u32) or on the integer pipes beside the row generator (u64), and only a rejection takes
   a scalar fixup.
+- Exponential draws `exponential_f64` and `exponential_f32` with fills `fill_exponential_f64`
+  and `fill_exponential_f32`, `-log(1 - u)` of one uniform per element. Element `i` of a fill is
+  the scalar draw `i`, and an empty fill moves nothing. They reuse the polynomial logarithm of the
+  normals with an explicit fused multiply-add for every multiply-add, in `f64` from `f64` draws
+  and in `f32` from `f32` draws, so the bytes equal `tandem-c`'s (FNV-1a `47f8f98297d94ee2` over
+  1e6 values of each width from five positions).
 
 ## Use
 
@@ -59,6 +65,7 @@ def main() raises:
     var c = rng.next_c64()                     # (re, im), two f64 draws
     var i = rng.below_u32(10)                  # uniform in 0..10, Lemire
     var z = rng.normal_f64()                   # Box-Muller from two f64 draws
+    var e = rng.exponential_f64()              # -log(1 - u), one f64 draw
     var worker = rng.split(7)                  # by index, from the key alone
     var kids = rng.fork(4)                     # from the current block, parent moves on
     var raw = Tandem.from_key(rng.key, rng.position(), rng.k)
@@ -120,6 +127,10 @@ pixi run test
   the flattened pairs, the series against libm over 2^18 pairs and the edges of the range, the
   hash of 1e6 pairs from five positions against the value of `tandem-c`, the moments of the
   normals, and that an empty fill moves nothing.
+  It checks the exponentials against `tandem-c`'s `cross_exponential.h` bit for bit, the hash of
+  1e6 values of each width from five positions, fills cut across the L1 block against the whole
+  fill and the scalar draws, that an empty fill moves nothing, and the moments to the fourth
+  order and the KS distance of 1e7 draws of each width against Exp(1).
 - `tests/test_gpu.mojo` (`pixi run test-gpu`, on a GPU host) compares the GPU fills with the
   CPU fills over chunk lengths and row ranges, and with the dump. CI does not run it.
 
@@ -148,6 +159,15 @@ half-second warm-up, GPU idle, in GiB/s.
 | `fill_u64_gpu` | 1208 |
 | `fill_f32_gpu` | 1160 |
 | `fill_f64_gpu` | 1188 |
+
+The exponential fills against the only exponential the Mojo standard library offers, `-log(1 - u)`
+over `random_float64` (it has no exponential sampler), `pixi run bench-exponential`, one thread,
+2^22 elements, minimum of five, in GiB/s.
+
+| Apple M4 | `f64` | `f32` |
+|---|---|---|
+| `fill_exponential_*` | 5.34 | 5.95 |
+| `-log(1 - random_float64())` | 0.31 | 0.15 |
 
 The CPU fill converts floats in the same pass that stores the row. The 32-bit low word of each
 product is a plain vector multiply, and only the high word is a widening one: taking both from
