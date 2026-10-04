@@ -3,7 +3,8 @@
 # Copyright 2026 Jessica Cox. Apache License 2.0, see LICENSE.
 
 from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left
-from std.math import iota
+from std.ffi import external_call
+from std.math import iota, sqrt
 from std.memory import bitcast, stack_allocation
 from std.sys import bit_width_of, has_accelerator
 from max.gpu import block_dim, block_idx, thread_idx
@@ -140,6 +141,10 @@ def fork_key(key: SIMD[DType.uint32, 4], block: UInt64, index: UInt64) -> SIMD[D
 # ---- Generator -----------------------------------------------------------------------------
 
 comptime DEFAULT_K: UInt32 = 32
+
+# Purposes reserved for the fallback generators of the bounded fills.
+comptime PURPOSE_BELOW32: UInt64 = 0x424C573332
+comptime PURPOSE_BELOW64: UInt64 = 0x424C573634
 comptime Row = SIMD[DType.uint32, 32]
 
 
@@ -172,6 +177,19 @@ def to_char(raw: UInt64) -> UInt32:
     """floor(raw * 1112064 / 2^64) as a code point that skips the surrogates."""
     var u = UInt32((UInt128(raw) * 1112064) >> 64)
     return u if u < 0xD800 else u + 0x800
+
+
+# The libm functions, not std.math's: its Float64 log is off by 1e-10, which the other ports
+# do not reproduce.
+def box_muller(a: Float64, b: Float64) -> Float64:
+    """u = 1 - a lies in (0, 1], so the logarithm is finite."""
+    var r = sqrt(-2.0 * external_call["log", Float64](1.0 - a))
+    return r * external_call["cos", Float64](6.283185307179586 * b)
+
+
+def box_muller_f32(a: Float32, b: Float32) -> Float32:
+    var r = sqrt(Float32(-2.0) * external_call["logf", Float32](Float32(1.0) - a))
+    return r * external_call["cosf", Float32](Float32(2.0) * Float32(3.14159265358979323846) * b)
 
 
 struct Cursor(Copyable, Movable):
@@ -437,6 +455,103 @@ struct Tandem(Copyable, Movable, Equatable):
 
     def at_f64(self, i: UInt64) -> Float64:
         return to_f64(self.at_u64(i))
+
+    # Bounded integers and normals ----------------------------------------------------------
+    # Not part of the specification. They follow the shared device core, tandem-cuda's
+    # core.hpp, so every port returns the same integers and f64 normals up to the last bits of
+    # log and cos. The f32 normal agrees to a few ulps only.
+
+    def below_u32(mut self, n: UInt32) -> UInt32:
+        """Uniform in 0..n by Lemire's multiply and reject on u32 draws. For n == 0 the result
+        is 0 after one draw."""
+        var m = UInt64(self.next_u32()) * UInt64(n)
+        if UInt32(m & 0xFFFFFFFF) < n:
+            var t = (UInt32(0) - n) % n
+            while UInt32(m & 0xFFFFFFFF) < t:
+                m = UInt64(self.next_u32()) * UInt64(n)
+        return UInt32(m >> 32)
+
+    def below_u64(mut self, n: UInt64) -> UInt64:
+        """Uniform in 0..n by Lemire's multiply and reject on u64 draws."""
+        var m = UInt128(self.next_u64()) * UInt128(n)
+        if UInt64(m & 0xFFFFFFFFFFFFFFFF) < n:
+            var t = (UInt64(0) - n) % n
+            while UInt64(m & 0xFFFFFFFFFFFFFFFF) < t:
+                m = UInt128(self.next_u64()) * UInt128(n)
+        return UInt64(m >> 64)
+
+    def fill_below_u32[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], count: Int, n: UInt32):
+        """Element i takes draw i of the u32 fill, and the fill consumes exactly count draws
+        whatever is rejected, so rows fill independently. A rejected draw retries with Lemire's
+        rule on the draws of key.sub(PURPOSE_BELOW32).split(i) at position 0. Without a
+        rejection the fill equals the scalar below_u32 calls."""
+        self.fill_u32(dst, count)
+        for e in range(count):
+            var m = UInt64(dst.unsafe_offset(e).unsafe_load()) * UInt64(n)
+            var lo = UInt32(m & 0xFFFFFFFF)
+            if lo < n and lo < (UInt32(0) - n) % n:
+                dst.unsafe_offset(e).unsafe_store(self.retry_u32(n, UInt64(e)))
+            else:
+                dst.unsafe_offset(e).unsafe_store(UInt32(m >> 32))
+
+    def fill_below_u64[origin: Origin[mut=True]](mut self, dst: Pointer[UInt64, origin], count: Int, n: UInt64):
+        """The u64 form of fill_below_u32, with PURPOSE_BELOW64."""
+        self.fill_u64(dst, count)
+        for e in range(count):
+            var m = UInt128(dst.unsafe_offset(e).unsafe_load()) * UInt128(n)
+            var lo = UInt64(m & 0xFFFFFFFFFFFFFFFF)
+            if lo < n and lo < (UInt64(0) - n) % n:
+                dst.unsafe_offset(e).unsafe_store(self.retry_u64(n, UInt64(e)))
+            else:
+                dst.unsafe_offset(e).unsafe_store(UInt64(m >> 64))
+
+    def retry_u32(self, n: UInt32, e: UInt64) -> UInt32:
+        var r = Self(trusted_key=self.key, position=0, k=self.k).sub(PURPOSE_BELOW32).split(e)
+        var t = (UInt32(0) - n) % n
+        while True:
+            var m = UInt64(r.next_u32()) * UInt64(n)
+            if UInt32(m & 0xFFFFFFFF) >= t:
+                return UInt32(m >> 32)
+
+    def retry_u64(self, n: UInt64, e: UInt64) -> UInt64:
+        var r = Self(trusted_key=self.key, position=0, k=self.k).sub(PURPOSE_BELOW64).split(e)
+        var t = (UInt64(0) - n) % n
+        while True:
+            var m = UInt128(r.next_u64()) * UInt128(n)
+            if UInt64(m & 0xFFFFFFFFFFFFFFFF) >= t:
+                return UInt64(m >> 64)
+
+    def normal_f64(mut self) -> Float64:
+        """A standard normal by Box-Muller from two f64 draws."""
+        var a = self.next_f64()
+        return box_muller(a, self.next_f64())
+
+    def normal_f32(mut self) -> Float32:
+        """A standard normal by Box-Muller in f32 from two f32 draws."""
+        var a = self.next_f32()
+        return box_muller_f32(a, self.next_f32())
+
+    def fill_normal_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int):
+        """Element i uses the f64 draws 2i and 2i + 1, as count calls to normal_f64 would."""
+        var draws = stack_allocation[256, Float64]()
+        var done = 0
+        while done < count:
+            var m = min(128, count - done)
+            self.fill_f64(draws, 2 * m)
+            for i in range(m):
+                dst.unsafe_offset(done + i).unsafe_store(box_muller(draws.unsafe_offset(2 * i).unsafe_load(), draws.unsafe_offset(2 * i + 1).unsafe_load()))
+            done += m
+
+    def fill_normal_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int):
+        """Element i uses the f32 draws 2i and 2i + 1, as count calls to normal_f32 would."""
+        var draws = stack_allocation[256, Float32]()
+        var done = 0
+        while done < count:
+            var m = min(128, count - done)
+            self.fill_f32(draws, 2 * m)
+            for i in range(m):
+                dst.unsafe_offset(done + i).unsafe_store(box_muller_f32(draws.unsafe_offset(2 * i).unsafe_load(), draws.unsafe_offset(2 * i + 1).unsafe_load()))
+            done += m
 
     # Derived generators --------------------------------------------------------------------
 
