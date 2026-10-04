@@ -3,6 +3,8 @@
 # Copyright 2026 Jessica Cox. Apache License 2.0, see LICENSE.
 
 from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left
+from std.math import iota
+from std.memory import bitcast, stack_allocation
 from std.sys import has_accelerator
 from max.gpu import block_dim, block_idx, thread_idx
 from max.gpu.host import DeviceContext
@@ -340,6 +342,77 @@ struct Tandem(Copyable, Movable, Equatable):
         """A uniform Unicode scalar value as its code point, from 64 stream bits."""
         return to_char(self.next_u64())
 
+    # Fills ---------------------------------------------------------------------------------
+
+    @always_inline
+    def fill[kind: Int, W: Int, T: DType, origin: Origin[mut=True]](mut self, dst: Pointer[Scalar[T], origin], n: Int):
+        """The values n scalar draws would produce, written row by row. The cache stays on the
+        last row written."""
+        var p = align(self.pos, UInt64(W))
+        self.pos = p + UInt64(W) * UInt64(n)
+        if n > 0:
+            fill_rows[kind, W, T](self.cur, self.key, self.k, p, n, dst.unsafe_origin_cast[MutAnyOrigin]())
+            self.words_valid = False
+
+    def fill_u8[origin: Origin[mut=True]](mut self, dst: Pointer[UInt8, origin], n: Int):
+        self.fill[KIND_INT, 8, DType.uint8](dst, n)
+
+    def fill_u16[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int):
+        self.fill[KIND_INT, 16, DType.uint16](dst, n)
+
+    def fill_u32[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], n: Int):
+        self.fill[KIND_INT, 32, DType.uint32](dst, n)
+
+    def fill_u64[origin: Origin[mut=True]](mut self, dst: Pointer[UInt64, origin], n: Int):
+        self.fill[KIND_INT, 64, DType.uint64](dst, n)
+
+    def fill_u128[origin: Origin[mut=True]](mut self, dst: Pointer[UInt128, origin], n: Int):
+        """128-bit elements, each as its low then its high 64-bit draw."""
+        self.pos = align(self.pos, 128)
+        self.fill[KIND_INT, 64, DType.uint64](dst.unsafe_bitcast[UInt64](), 2 * n)
+
+    def fill_i8[origin: Origin[mut=True]](mut self, dst: Pointer[Int8, origin], n: Int):
+        self.fill[KIND_INT, 8, DType.int8](dst, n)
+
+    def fill_i16[origin: Origin[mut=True]](mut self, dst: Pointer[Int16, origin], n: Int):
+        self.fill[KIND_INT, 16, DType.int16](dst, n)
+
+    def fill_i32[origin: Origin[mut=True]](mut self, dst: Pointer[Int32, origin], n: Int):
+        self.fill[KIND_INT, 32, DType.int32](dst, n)
+
+    def fill_i64[origin: Origin[mut=True]](mut self, dst: Pointer[Int64, origin], n: Int):
+        self.fill[KIND_INT, 64, DType.int64](dst, n)
+
+    def fill_i128[origin: Origin[mut=True]](mut self, dst: Pointer[Int128, origin], n: Int):
+        self.pos = align(self.pos, 128)
+        self.fill[KIND_INT, 64, DType.uint64](dst.unsafe_bitcast[UInt64](), 2 * n)
+
+    def fill_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], n: Int):
+        self.fill[KIND_F32, 32, DType.float32](dst, n)
+
+    def fill_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], n: Int):
+        self.fill[KIND_F64, 64, DType.float64](dst, n)
+
+    def fill_f16_bits[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int):
+        self.fill[KIND_F16, 16, DType.uint16](dst, n)
+
+    def fill_char[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], n: Int):
+        """Unicode scalar values as code points, 64 stream bits each."""
+        self.fill[KIND_CHAR, 64, DType.uint32](dst, n)
+
+    def fill_bool[origin: Origin[mut=True]](mut self, dst: Pointer[Bool, origin], n: Int):
+        self.fill[KIND_BOOL, 1, DType.uint8](dst.unsafe_bitcast[UInt8](), n)
+
+    def fill_c32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], n: Int):
+        """n complex values as interleaved (re, im): the f32 fill of length 2n."""
+        self.fill_f32(dst, 2 * n)
+
+    def fill_c64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], n: Int):
+        self.fill_f64(dst, 2 * n)
+
+    def fill_c16_bits[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int):
+        self.fill_f16_bits(dst, 2 * n)
+
     # Random access -------------------------------------------------------------------------
 
     def at_u8(self, i: UInt64) -> UInt8:
@@ -405,39 +478,78 @@ def row_words(s: Lanes[8]) -> SIMD[DType.uint32, 32]:
     return lanes0to3.join(lanes4to7)
 
 
-def fill_u32[origin: Origin[mut=True]](key: SIMD[DType.uint32, 4], pos: UInt64, K: UInt32, dst: Pointer[UInt32, origin], n: Int) -> UInt64:
-    """Write n stream words from the 32-bit aligned position pos. Returns the position after."""
-    var p = (pos + 31) & ~UInt64(31)
-    var word = Int(p >> 5)
-    var end = word + n
-    var shift = UInt64(count_trailing_zeros(K))
-    var mask = UInt64(K) - 1
-    var row = UInt64(word >> 5)
-    var last_row = UInt64((end + 31) >> 5)
-    var lanes = Lanes[8](0, 0, 0, 0, 0, 0, 0, 0)
+comptime KIND_INT = 0
+comptime KIND_F32 = 1
+comptime KIND_F64 = 2
+comptime KIND_F16 = 3
+comptime KIND_CHAR = 4
+comptime KIND_BOOL = 5
+
+
+@always_inline
+def store_row[kind: Int, W: Int, T: DType](words: Row, dst: Pointer[Scalar[T], MutAnyOrigin]):
+    """Convert one row to its 1024 / W elements and store them. After alignment every integer
+    fill is the same little-endian byte stream, so the integer kinds only reinterpret it."""
+    comptime N = 1024 // W
+    comptime if kind == KIND_INT:
+        dst.unsafe_store(bitcast[T, N](words))
+    elif kind == KIND_F32:
+        dst.unsafe_bitcast[Float32]().unsafe_store((words >> 8).cast[DType.float32]() * 5.9604645e-08)
+    elif kind == KIND_F64:
+        var x = bitcast[DType.uint64, 16](words)
+        dst.unsafe_bitcast[Float64]().unsafe_store((x >> 11).cast[DType.float64]() * 1.1102230246251565e-16)
+    elif kind == KIND_F16:
+        var k = (bitcast[DType.uint16, 64](words) >> 5).cast[DType.uint32]()
+        var m = 31 - count_leading_zeros(k)
+        var bits = ((m + 4) << 10) | ((k << (10 - m)) & 0x3FF)
+        dst.unsafe_bitcast[UInt16]().unsafe_store(k.eq(0).select(SIMD[DType.uint32, 64](0), bits).cast[DType.uint16]())
+    elif kind == KIND_CHAR:
+        var x = bitcast[DType.uint64, 16](words)
+        var hi = x >> 32
+        var lo = x & 0xFFFFFFFF
+        var u = ((hi * 1112064) + ((lo * 1112064) >> 32)) >> 32
+        dst.unsafe_bitcast[UInt32]().unsafe_store(u.lt(0xD800).select(u, u + 0x800).cast[DType.uint32]())
+    else:
+        var shifts = iota[DType.uint32, 32]()
+        for j in range(32):
+            dst.unsafe_bitcast[UInt8]().unsafe_offset(32 * j).unsafe_store(((SIMD[DType.uint32, 32](words[j]) >> shifts) & 1).cast[DType.uint8]())
+
+
+def fill_rows[kind: Int, W: Int, T: DType](mut cur: Cursor, key: SIMD[DType.uint32, 4], K: UInt32, p: UInt64, n: Int, dst: Pointer[Scalar[T], MutAnyOrigin]):
+    """Write n elements of W bits from the W-aligned bit position p, row by row. A row that the
+    fill covers entirely goes straight to dst. The first and last row go through a scratch row."""
+    comptime per_row = 1024 // W
+    var first_el = Int(p // UInt64(W))
+    var end = first_el + n
+    var row = first_el // per_row
+    var last_row = (end + per_row - 1) // per_row
+    var c = cur.copy()
+    var scratch = stack_allocation[per_row, Scalar[T]]()
     var i = 0
     while row < last_row:
-        var step_in_group = row & mask
-        if row == UInt64(word >> 5) or step_in_group == 0:
-            var g = row >> shift
-            var c0 = 8 * g
-            var lo = SIMD[DType.uint32, 8](0, 1, 2, 3, 4, 5, 6, 7) + UInt32(c0 & 0xFFFFFFFF)
-            lanes = Lanes[8].keyed(key, lo, SIMD[DType.uint32, 8](UInt32(c0 >> 32)), DOMAIN_STREAM, AUX_STREAM)
-            for _ in range(Int(step_in_group) + 1):
-                lanes.step()
+        c.seek(key, K, UInt64(row))
+        var words = row_words(c.lanes)
+        var first = row * per_row
+        if first >= first_el and first + per_row <= end:
+            store_row[kind, W, T](words, dst.unsafe_offset(i))
+            i += per_row
         else:
-            lanes.step()
-        var words = row_words(lanes)
-        var first = Int(row) * 32
-        if first >= word and first + 32 <= end:
-            dst.unsafe_offset(i).unsafe_store(words)
-            i += 32
-        else:
-            for w in range(32):
-                if first + w >= word and first + w < end:
-                    dst.unsafe_offset(i).unsafe_store(words[w])
-                    i += 1
+            store_row[kind, W, T](words, scratch.unsafe_origin_cast[MutAnyOrigin]())
+            var lo = max(first_el, first) - first
+            var hi = min(end, first + per_row) - first
+            for j in range(lo, hi):
+                dst.unsafe_offset(i).unsafe_store(scratch.unsafe_offset(j).unsafe_load())
+                i += 1
         row += 1
+    cur = c^
+
+
+def fill_u32[origin: Origin[mut=True]](key: SIMD[DType.uint32, 4], pos: UInt64, K: UInt32, dst: Pointer[UInt32, origin], n: Int) -> UInt64:
+    """Write n stream words from the 32-bit aligned position pos. Returns the position after."""
+    var p = align(pos, 32)
+    if n > 0:
+        var cur = Cursor()
+        fill_rows[KIND_INT, 32, DType.uint32](cur, key, K, p, n, dst.unsafe_origin_cast[MutAnyOrigin]())
     return p + UInt64(n) * 32
 
 

@@ -1,9 +1,10 @@
 # tandem-mojo
 
-Prototype of [Tandem8x32](https://github.com/tandem-rng/spec) in Mojo: the specification's
-building blocks, a CPU row fill over eight SIMD lanes, and a GPU row fill with one thread per
-chunk, in one file, `tandem.mojo`. It produces the stream the specification defines, bit for
-bit, for 32-bit words. Scalar draws, other widths, and the float mappings are not written yet.
+Prototype of [Tandem8x32](https://github.com/tandem-rng/spec) in Mojo, in one file,
+`tandem.mojo`: the specification's building blocks, a `Tandem` generator with scalar draws of
+every specification type, CPU fills over eight SIMD lanes for every width and float type, and a
+GPU row fill with one thread per chunk (32-bit words so far). It produces the stream the
+specification defines, bit for bit.
 
 ```sh
 pixi install          # Mojo 1.1 and MAX 26.6 from the Modular conda channel

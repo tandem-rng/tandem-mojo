@@ -8,7 +8,7 @@ mojo = ">=1.1"
 max = ">=26.6"
 
 [tasks]
-test = "mojo run -I . tests/test_tandem.mojo"
+test = "mojo run -I . tests/test_tandem.mojo && mojo run -I . tests/test_fills.mojo"
 bench = "mojo run -I . tools/bench.mojo"
 test-gpu = "mojo run -I . tests/test_gpu.mojo"
 bench-gpu = "mojo run -I . tools/bench_gpu.mojo"
