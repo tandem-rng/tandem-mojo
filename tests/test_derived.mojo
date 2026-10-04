@@ -19,9 +19,11 @@ from derived_data import (
     below_u64_want,
     fill_below_u32_bounds,
     fill_below_u32_end,
+    fill_below_u32_starts,
     fill_below_u32_want,
     fill_below_u64_bounds,
     fill_below_u64_end,
+    fill_below_u64_starts,
     fill_below_u64_want,
     cuda_below_u32_range,
     cuda_below_u32_rejected,
@@ -67,13 +69,15 @@ def test_below_matches_the_device_core() raises:
 
 
 def test_fill_below_matches_the_device_core() raises:
-    """The large bounds reject often in 64 elements, so the fallback generator runs."""
+    """The starts 0, 1 and 12345 bits give the global draw indices 0, 1 and 386 (193 for u64), so the
+    fallback key differs from the element index. The large bounds reject often in 64 elements."""
+    var s32 = fill_below_u32_starts()
     var n32 = fill_below_u32_bounds()
     var want32 = fill_below_u32_want()
     var end32 = fill_below_u32_end()
     var differs = 0
     for c in range(len(n32)):
-        var g = start()
+        var g = Tandem.from_key(seed(42), s32[c])
         var scalar = g.copy()
         var out = unsafe_alloc[UInt32](64)
         g.fill_below_u32(out, 64, n32[c])
@@ -84,11 +88,12 @@ def test_fill_below_matches_the_device_core() raises:
         assert_equal(g.position(), end32[c])
         out.unsafe_free()
     assert_true(differs > 0)
+    var s64 = fill_below_u64_starts()
     var n64 = fill_below_u64_bounds()
     var want64 = fill_below_u64_want()
     var end64 = fill_below_u64_end()
     for c in range(len(n64)):
-        var g = start()
+        var g = Tandem.from_key(seed(42), s64[c])
         var out = unsafe_alloc[UInt64](64)
         g.fill_below_u64(out, 64, n64[c])
         for i in range(64):
@@ -108,8 +113,9 @@ def test_bound_zero_returns_zero_after_one_draw() raises:
     assert_true(a == b)
 
 
-def below_by_definition[bits: Int](rng: Tandem, raw: List[UInt64], n: UInt64) raises -> List[UInt64]:
-    """Element i takes draw i of the raw fill. A rejected draw retries on sub(purpose).split(i) of the key at position 0."""
+def below_by_definition[bits: Int](rng: Tandem, raw: List[UInt64], n: UInt64, first: Int) raises -> List[UInt64]:
+    """Element i takes draw i of the raw fill. A rejected draw retries on sub(purpose).split(g) of
+    the key at position 0, with the global draw index g = first + i."""
     var base = Tandem.from_key(rng.key, 0, rng.k)
     var sub = base.sub(PURPOSE_BELOW32 if bits == 32 else PURPOSE_BELOW64)
     var mask = (UInt128(1) << UInt128(bits)) - 1
@@ -118,7 +124,7 @@ def below_by_definition[bits: Int](rng: Tandem, raw: List[UInt64], n: UInt64) ra
     for i in range(len(raw)):
         var m = UInt128(raw[i]) * UInt128(n)
         if (m & mask) < reject:
-            var r = sub.split(UInt64(i))
+            var r = sub.split(UInt64(first + i))
             comptime if bits == 32:
                 m = UInt128(r.next_u32()) * UInt128(n)
                 while (m & mask) < reject:
@@ -144,7 +150,7 @@ def test_bounded_fills_follow_the_definition() raises:
             var draws = List[UInt64]()
             for i in range(count):
                 draws.append(UInt64(words.unsafe_offset(i).unsafe_load()))
-            var want = below_by_definition[32](rng, draws, UInt64(n))
+            var want = below_by_definition[32](rng, draws, UInt64(n), 1)
             for i in range(count):
                 assert_equal(UInt64(got.unsafe_offset(i).unsafe_load()), want[i], String("u32 n=", n, " count=", count, " element ", i))
             if count > 0:
@@ -163,7 +169,7 @@ def test_bounded_fills_follow_the_definition() raises:
             var draws = List[UInt64]()
             for i in range(count):
                 draws.append(words.unsafe_offset(i).unsafe_load())
-            var want = below_by_definition[64](rng, draws, UInt64(n))
+            var want = below_by_definition[64](rng, draws, UInt64(n), 1)
             for i in range(count):
                 assert_equal(got.unsafe_offset(i).unsafe_load(), want[i], String("u64 n=", n, " count=", count, " element ", i))
             if count > 0:
@@ -382,7 +388,7 @@ def test_simd_fills_are_lane_independent() raises:
                 var t = (UInt32(0) - UInt32(n)) % UInt32(n)
                 var want = UInt32(m >> 32)
                 if UInt32(m & 0xFFFFFFFF) < t:
-                    var r = base.sub(PURPOSE_BELOW32).split(UInt64(i))
+                    var r = base.sub(PURPOSE_BELOW32).split(UInt64(1 + i))
                     var q = UInt64(r.next_u32()) * UInt64(n)
                     while UInt32(q & 0xFFFFFFFF) < t:
                         q = UInt64(r.next_u32()) * UInt64(n)
@@ -390,6 +396,65 @@ def test_simd_fills_are_lane_independent() raises:
                 assert_equal(got.unsafe_offset(i).unsafe_load(), want, String("u32 count ", count, " n ", n, " element ", i))
             got.unsafe_free()
             raw.unsafe_free()
+
+
+def test_cut_bounded_fills_equal_the_whole_fill() raises:
+    """Fills cut at arbitrary element boundaries and run one after the other equal the whole fill,
+    at a start that is not on a draw boundary and with rejections in every piece."""
+    var cuts = [0, 1, 17, 18, 1025, 2000, 3000]
+    var whole32 = unsafe_alloc[UInt32](3000)
+    var cut32 = unsafe_alloc[UInt32](3000)
+    var a = Tandem.from_key(seed(42), 12345)
+    a.fill_below_u32(whole32, 3000, 0xC0000001)
+    var b = Tandem.from_key(seed(42), 12345)
+    var rejected = 0
+    var plain = Tandem.from_key(seed(42), 12345)
+    for _ in range(3000):
+        rejected += Int(UInt32(UInt64(plain.next_u32()) * 0xC0000001 & 0xFFFFFFFF) < 0x3FFFFFFF)
+    for c in range(len(cuts) - 1):
+        b.fill_below_u32(cut32.unsafe_offset(cuts[c]), cuts[c + 1] - cuts[c], 0xC0000001)
+    assert_true(rejected > 100)
+    for i in range(3000):
+        assert_equal(cut32.unsafe_offset(i).unsafe_load(), whole32.unsafe_offset(i).unsafe_load(), String("u32 element ", i))
+    assert_true(a == b)
+    whole32.unsafe_free()
+    cut32.unsafe_free()
+    var whole64 = unsafe_alloc[UInt64](3000)
+    var cut64 = unsafe_alloc[UInt64](3000)
+    var c0 = Tandem.from_key(seed(42), 12345)
+    c0.fill_below_u64(whole64, 3000, 0xC000000000000001)
+    var d = Tandem.from_key(seed(42), 12345)
+    for c in range(len(cuts) - 1):
+        d.fill_below_u64(cut64.unsafe_offset(cuts[c]), cuts[c + 1] - cuts[c], 0xC000000000000001)
+    for i in range(3000):
+        assert_equal(cut64.unsafe_offset(i).unsafe_load(), whole64.unsafe_offset(i).unsafe_load(), String("u64 element ", i))
+    assert_true(c0 == d)
+    whole64.unsafe_free()
+    cut64.unsafe_free()
+
+
+def test_normal_fills_have_the_bytes_of_tandem_c() raises:
+    """The FNV-1a hash of 1e6 pairs of f64 and f32 normals from five positions, the value that
+    tandem-c's tests/test_normal_bits.c records, whose SHA-256 dump this port matches too."""
+    comptime PAIRS = 1000000
+    var starts: List[UInt64] = [0, 1, 77, 12345, 1 << 30]
+    var d = unsafe_alloc[Float64](2 * PAIRS)
+    var f = unsafe_alloc[Float32](2 * PAIRS)
+    var h = UInt64(0xCBF29CE484222325)
+    for s in starts:
+        var g = Tandem(UInt128(2026) | (UInt128(7) << 64))
+        g.set_position(s)
+        g.fill_normal_f64(d, 2 * PAIRS - 1)
+        var bytes = d.unsafe_bitcast[UInt8]()
+        for i in range((2 * PAIRS - 1) * 8):
+            h = (h ^ UInt64(bytes.unsafe_offset(i).unsafe_load())) * 0x100000001B3
+        g.fill_normal_f32(f, 2 * PAIRS - 1)
+        var bytes32 = f.unsafe_bitcast[UInt8]()
+        for i in range((2 * PAIRS - 1) * 4):
+            h = (h ^ UInt64(bytes32.unsafe_offset(i).unsafe_load())) * 0x100000001B3
+    d.unsafe_free()
+    f.unsafe_free()
+    assert_equal(h, UInt64(0x9414E1315E2653BE))
 
 
 def test_normals_have_unit_moments() raises:
@@ -431,5 +496,7 @@ def main() raises:
     test_fills_match_the_cuda_fixtures()
     test_series_against_libm()
     test_simd_fills_are_lane_independent()
+    test_cut_bounded_fills_equal_the_whole_fill()
+    test_normal_fills_have_the_bytes_of_tandem_c()
     test_normals_have_unit_moments()
     print("mojo derived: ok")

@@ -18,19 +18,22 @@ the specification defines, bit for bit. The whole port is one file, `tandem.mojo
   thread stores its blocks from registers.
 - Bounded integers (`below_u32`, `below_u64`) and standard normals (`normal_f64`, `normal_f32`,
   and the pairs `normal2_f64`, `normal2_f32`) with fills. They are not in the specification.
-  They follow the shared device core in `tandem-cuda`, so every port returns the same integers
-  and `f64` normals up to the last bits of `log`, `cos` and `sin`. A bound of 0 returns 0 after
-  one draw. `fill_below_*` takes draw `i` of the plain fill for element `i` and consumes exactly
-  one draw per element. A rejected draw retries on `sub(purpose).split(i)` of the key, as the
-  device core does. A normal step uses two uniforms and returns the cos half then the sin half.
-  A scalar normal is the cos half, and a normal fill is the flattened pairs, so an odd count
-  consumes both uniforms of its last pair. An empty bounded or normal fill moves nothing.
-  The normals are computed on SIMD lanes with near-minimax polynomials for the logarithm and
-  the angle (`tools/gen_coefficients.py`), accurate to about 1e-15 in `f64`, so a scalar normal
-  and a fill agree bit for bit and the ports agree to the tolerances of the cross-check values,
-  not bit for bit. The `f32` normal runs in `f32`. The bounded fills do the multiply-high and
-  the compare on SIMD lanes (u32) or on the integer pipes beside the row generator (u64), and
-  only a rejection takes a scalar fixup.
+  They follow the shared device core in `tandem-cuda`, so every port returns the same integers.
+  A bound of 0 returns 0 after one draw. `fill_below_*` takes draw `i` of the plain fill for
+  element `i` and consumes exactly one draw per element. A rejected draw retries on
+  `sub(purpose).split(g)` of the key, with `g` the global draw index, the aligned start position
+  over the draw width plus `i`, so a fill cut into chunks equals the whole fill. The bounded
+  APIs are typed by draw width, `below_u32` and `below_u64`, so the draw width never depends on
+  a result type. They exist on the CPU only. A normal step uses two uniforms and returns the cos
+  half then the sin half. A scalar normal is the cos half, and a normal fill is the flattened
+  pairs, so an odd count consumes both uniforms of its last pair. An empty bounded or normal
+  fill moves nothing. The normals run on SIMD lanes with the algorithm and coefficients of
+  `tandem-c` and an explicit fused multiply-add for every multiply-add, so they are byte
+  identical to `tandem-c` (same SHA-256 from `tools/dump_normals.mojo` and
+  `tools/dump_normals.c`, checked on arm64). They agree with libm to about 1e-15 in `f64`. The
+  `f32` normal runs in `f32`. The bounded fills do the multiply-high and the compare on SIMD
+  lanes (u32) or on the integer pipes beside the row generator (u64), and only a rejection takes
+  a scalar fixup.
 
 ## Use
 
@@ -109,9 +112,11 @@ pixi run test
 - `tests/test_derived.mojo` compares bounded integers and normals with the cross-check values
   of `tandem-c`, which it generates from the `tandem-cuda` core, and the bounded and normal
   fills with the fill fixtures of `tandem-cuda` that `tandem-c` carries
-  (`tools/gen_derived.py` converts both). It checks the bounded fills against their definition
-  and at every length that cuts a SIMD block, the normal fills against the flattened pairs, the
-  polynomials against libm over 2^18 pairs and the edges of the range, the moments of the
+  (`tools/gen_derived.py` converts both), the bounded ones from the starts 0, 1 and 12345 bits.
+  It checks the bounded fills against their definition, at every length that cuts a SIMD block,
+  and cut into chunks against the whole fill with rejections. It checks the normal fills against
+  the flattened pairs, the series against libm over 2^18 pairs and the edges of the range, the
+  hash of 1e6 pairs from five positions against the value of `tandem-c`, the moments of the
   normals, and that an empty fill moves nothing.
 - `tests/test_gpu.mojo` (`pixi run test-gpu`, on a GPU host) compares the GPU fills with the
   CPU fills over chunk lengths and row ranges, and with the dump. CI does not run it.

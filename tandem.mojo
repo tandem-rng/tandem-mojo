@@ -213,129 +213,119 @@ def to_char(raw: UInt64) -> UInt32:
 
 
 # ---- Normals on SIMD lanes -----------------------------------------------------------------
-# Series instead of libm calls: std.math's Float64 log is off by 1e-10 and a libm call per
-# element would dominate the fill. The coefficients are near-minimax polynomials from
-# tools/gen_coefficients.py, with errors under 2e-16 (Float64) and 3e-9 (Float32).
+# The algorithm and coefficients of tandem-c's normal loop, with an explicit fma for every
+# multiply-add and no other contraction, so that every port gives the same bytes. A libm call
+# per element would dominate the fill, and std.math's Float64 log is off by 1e-10.
 
 @always_inline
-def neg2_log_f64[W: Int](u: SIMD[DType.float64, W]) -> SIMD[DType.float64, W]:
-    """-2 ln u for u in (0, 1], the radius squared of a Box-Muller step: the exponent by bit extraction, then 2 atanh(s) =
-    2 s P(s^2) with s = (m - 1) / (m + 1) on the mantissa m in [1/sqrt 2, sqrt 2)."""
-    # Subtracting the bits of 1 / sqrt 2 makes the exponent field of the difference the
-    # exponent e that puts m = u / 2^e in [1 / sqrt 2, sqrt 2), with no compare or select.
-    var bits = bitcast[DType.uint64, W](u)
-    var ei = bitcast[DType.int64, W](bits - 0x3FE6A09E667F3BCD) >> 52
-    var m = bitcast[DType.float64, W](bits - (bitcast[DType.uint64, W](ei) << 52))
-    var ef = ei.cast[DType.float64]()
+def neg2_log_f64[W: Int](a: SIMD[DType.float64, W]) -> SIMD[DType.float64, W]:
+    """-2 ln(1 - a) for a in [0, 1): 1 - a is exact. Its mantissa m in [1/sqrt 2, sqrt 2) comes
+    from the exponent bits, then ln m = 2 s P(s^2) with s = (m - 1) / (m + 1)."""
+    var bits = bitcast[DType.uint64, W](1.0 - a)
+    var ix = bits + 0x00095F6200000000
+    var nk = (1023 - (ix >> 52).cast[DType.int64]()).cast[DType.float64]()
+    var m = bitcast[DType.float64, W]((ix & 0x000FFFFFFFFFFFFF) + 0x3FE6A09E00000000)
     var s = (m - 1.0) / (m + 1.0)
-    var w = s * s
-    var p = SIMD[DType.float64, W](0.08418829985340244)
-    p = fma(p, w, 0.09060967215607607)
-    p = fma(p, w, 0.11111717273758953)
-    p = fma(p, w, 0.14285708010553835)
-    p = fma(p, w, 0.20000000030870807)
-    p = fma(p, w, 0.3333333333327646)
-    p = fma(p, w, 1.0000000000000002)
-    return fma(ef, -1.3862943611198906, (s * -4.0) * p)
+    var zz = s * s
+    var p = SIMD[DType.float64, W](0.08312363319426472)
+    p = fma(zz, p, 0.09070001083303751)
+    p = fma(zz, p, 0.11111433317907482)
+    p = fma(zz, p, 0.14285712049336274)
+    p = fma(zz, p, 0.2000000000566491)
+    p = fma(zz, p, 0.33333333333331017)
+    p = fma(zz, p, 1.0)
+    # ln 2 is split so that nk * ln2_hi is exact.
+    return fma(nk, 3.816429394731813e-10, fma(nk, 1.3862943607382476, (s * -4.0) * p))
 
 
 @always_inline
 def sincos_2pi_f64[W: Int](b: SIMD[DType.float64, W]) -> Tuple[SIMD[DType.float64, W], SIMD[DType.float64, W]]:
-    """(sin, cos) of 2 pi b for b in [0, 1). The nearest quarter turn q is removed exactly,
-    since 4b and q are exact, which leaves x = (4b - q) pi / 2 in [-pi/4, pi/4] for the polynomials."""
-    var t = b * 4.0
-    var q = round(t)
-    var x = (t - q) * 1.5707963267948966
-    var x2 = x * x
-    var sp = SIMD[DType.float64, W](1.5894736651849094e-10)
-    sp = fma(sp, x2, -2.5050716974102745e-08)
-    sp = fma(sp, x2, 2.755731337640013e-06)
-    sp = fma(sp, x2, -0.000198412698286503)
-    sp = fma(sp, x2, 0.008333333333320363)
-    sp = fma(sp, x2, -0.16666666666666616)
-    sp = fma(sp, x2, 1.0)
-    var sx = x * sp
-    var cp = SIMD[DType.float64, W](2.0630454379662294e-09)
-    cp = fma(cp, x2, -2.755523388484742e-07)
-    cp = fma(cp, x2, 2.4801578538562985e-05)
-    cp = fma(cp, x2, -0.0013888888869978658)
-    cp = fma(cp, x2, 0.041666666666472306)
-    cp = fma(cp, x2, -0.4999999999999925)
-    cp = fma(cp, x2, 1.0)
-    # With the quarter turn q mod 4: odd q swaps the roles of sin x and cos x, sin is negative
-    # for q = 2, 3 and cos for q = 1, 2, which are the sign bits of q << 62 and (q ^ q >> 1) << 63.
-    var qi = bitcast[DType.uint64, W](q.cast[DType.int64]())
-    var swap = (qi & 1).eq(1)
-    var sin_sign = qi << 62 & 9223372036854775808
-    var cos_sign = (qi ^ (qi >> 1)) << 63
-    var c = bitcast[DType.uint64, W](swap.select(sx, cp)) ^ cos_sign
-    var sn = bitcast[DType.uint64, W](swap.select(cp, sx)) ^ sin_sign
-    return (bitcast[DType.float64, W](sn), bitcast[DType.float64, W](c))
+    """(sin, cos) of 2 pi b for b in [0, 1). b - q/4 for the nearest quarter turn q is exact,
+    which leaves the angle th in [-pi/4, pi/4] for the polynomials."""
+    var q = (b * 4.0 + 0.5).cast[DType.int64]()
+    var f = fma(-(q.cast[DType.float64]()), 0.25, b)
+    var th = f * 6.283185307179586
+    var w = th * th
+    var hs = SIMD[DType.float64, W](1.5914650986900946e-10)
+    hs = fma(w, hs, -2.5051097984389413e-08)
+    hs = fma(w, hs, 2.755731600073921e-06)
+    hs = fma(w, hs, -0.00019841269836630226)
+    hs = fma(w, hs, 0.008333333333330813)
+    hs = fma(w, hs, -0.16666666666666669)
+    var hc = SIMD[DType.float64, W](2.0665708703855164e-09)
+    hc = fma(w, hc, -2.7555858522576447e-07)
+    hc = fma(w, hc, 2.480158263811954e-05)
+    hc = fma(w, hc, -0.0013888888882156126)
+    hc = fma(w, hc, 0.04166666666663108)
+    hc = fma(w, hc, -0.4999999999999997)
+    var sn = th * fma(w, hs, 1.0)
+    var cs = fma(w, hc, 1.0)
+    # Odd q swaps sin and cos, bit 1 of q negates the sin, and bit 1 of q + 1 the cos.
+    var qu = bitcast[DType.uint64, W](q)
+    var swap = (qu & 1).eq(1)
+    var sb = bitcast[DType.uint64, W](sn)
+    var cb = bitcast[DType.uint64, W](cs)
+    var xb = swap.select(sb, cb) ^ (((qu + 1) << 62) & 0x8000000000000000)
+    var yb = swap.select(cb, sb) ^ ((qu << 62) & 0x8000000000000000)
+    return (bitcast[DType.float64, W](yb), bitcast[DType.float64, W](xb))
 
 
 @always_inline
 def normal2_f64[W: Int](a: SIMD[DType.float64, W], b: SIMD[DType.float64, W]) -> Tuple[SIMD[DType.float64, W], SIMD[DType.float64, W]]:
     """Both halves of a Box-Muller step, cos first: z0 = r cos(2 pi b), z1 = r sin(2 pi b),
-    r = sqrt(-2 log(1 - a)). 1 - a lies in (0, 1], so the logarithm is finite. Every operation
-    is lane-wise and the polynomials use explicit fma, so any width gives the same bits."""
-    var r = sqrt(neg2_log_f64(1.0 - a))
+    r = sqrt(-2 log(1 - a)). Every operation is lane-wise, so any width gives the same bits."""
+    var r = sqrt(neg2_log_f64(a))
     var sc = sincos_2pi_f64(b)
     return (r * sc[1], r * sc[0])
 
 
 @always_inline
-def neg2_log_f32[W: Int](u: SIMD[DType.float32, W]) -> SIMD[DType.float32, W]:
-    """-2 ln u for u in (0, 1], the radius squared of a Box-Muller step: the exponent by bit extraction, then 2 atanh(s) =
-    2 s P(s^2) with s = (m - 1) / (m + 1) on the mantissa m in [1/sqrt 2, sqrt 2)."""
-    var bits = bitcast[DType.uint32, W](u)
-    var ei = bitcast[DType.int32, W](bits - 0x3F3504F3) >> 23
-    var m = bitcast[DType.float32, W](bits - (bitcast[DType.uint32, W](ei) << 23))
-    var ef = ei.cast[DType.float32]()
+def neg2_log_f32[W: Int](a: SIMD[DType.float32, W]) -> SIMD[DType.float32, W]:
+    """The Float32 form of neg2_log_f64."""
+    var bits = bitcast[DType.uint32, W](1.0 - a)
+    var ix = bits + 0x004AFB0D
+    var nk = (127 - (ix >> 23).cast[DType.int32]()).cast[DType.float32]()
+    var m = bitcast[DType.float32, W]((ix & 0x007FFFFF) + 0x3F3504F3)
     var s = (m - 1.0) / (m + 1.0)
-    var w = s * s
-    var p = SIMD[DType.float32, W](0.14962195239572493)
-    p = fma(p, w, 0.19987425258759525)
-    p = fma(p, w, 0.33333407669075593)
-    p = fma(p, w, 0.9999999993156591)
-    return fma(ef, -1.3862943611198906, (s * -4.0) * p)
+    var zz = s * s
+    var p = SIMD[DType.float32, W](0.14275366)
+    p = fma(zz, p, 0.20000061)
+    p = fma(zz, p, 0.33333334)
+    p = fma(zz, p, 1.0)
+    return fma(nk, 2.857213530660374e-06, fma(nk, 1.38629150390625, (s * -4.0) * p))
 
 
 @always_inline
 def sincos_2pi_f32[W: Int](b: SIMD[DType.float32, W]) -> Tuple[SIMD[DType.float32, W], SIMD[DType.float32, W]]:
-    """(sin, cos) of 2 pi b for b in [0, 1). The nearest quarter turn q is removed exactly,
-    since 4b and q are exact, which leaves x = (4b - q) pi / 2 in [-pi/4, pi/4] for the polynomials."""
-    var t = b * 4.0
-    var q = round(t)
-    var x = (t - q) * 1.5707963267948966
-    var x2 = x * x
-    var sp = SIMD[DType.float32, W](2.7173456841089953e-06)
-    sp = fma(sp, x2, -0.000198392022122311)
-    sp = fma(sp, x2, 0.00833332878245888)
-    sp = fma(sp, x2, -0.16666666631591165)
-    sp = fma(sp, x2, 0.9999999999956731)
-    var sx = x * sp
-    var cp = SIMD[DType.float32, W](2.4379831251175367e-05)
-    cp = fma(cp, x2, -0.0013886617999647076)
-    cp = fma(cp, x2, 0.041666616692532826)
-    cp = fma(cp, x2, -0.4999999961485761)
-    cp = fma(cp, x2, 0.9999999999524894)
-    # With the quarter turn q mod 4: odd q swaps the roles of sin x and cos x, sin is negative
-    # for q = 2, 3 and cos for q = 1, 2, which are the sign bits of q << 30 and (q ^ q >> 1) << 31.
-    var qi = bitcast[DType.uint32, W](q.cast[DType.int32]())
-    var swap = (qi & 1).eq(1)
-    var sin_sign = qi << 30 & 2147483648
-    var cos_sign = (qi ^ (qi >> 1)) << 31
-    var c = bitcast[DType.uint32, W](swap.select(sx, cp)) ^ cos_sign
-    var sn = bitcast[DType.uint32, W](swap.select(cp, sx)) ^ sin_sign
-    return (bitcast[DType.float32, W](sn), bitcast[DType.float32, W](c))
+    """The Float32 form of sincos_2pi_f64, with 2 pi as a pair of floats so that the angle is
+    good to the last bit."""
+    var q = (b * 4.0 + 0.5).cast[DType.int32]()
+    var f = fma(-(q.cast[DType.float32]()), 0.25, b)
+    var th = fma(f, -1.7484555e-7, f * 6.2831855)
+    var w = th * th
+    var hs = SIMD[DType.float32, W](2.72499e-06)
+    hs = fma(w, hs, -0.00019840087)
+    hs = fma(w, hs, 0.008333332)
+    hs = fma(w, hs, -0.16666667)
+    var hc = SIMD[DType.float32, W](2.4463761e-05)
+    hc = fma(w, hc, -0.0013887589)
+    hc = fma(w, hc, 0.04166665)
+    hc = fma(w, hc, -0.5)
+    var sn = th * fma(w, hs, 1.0)
+    var cs = fma(w, hc, 1.0)
+    var qu = bitcast[DType.uint32, W](q)
+    var swap = (qu & 1).eq(1)
+    var sb = bitcast[DType.uint32, W](sn)
+    var cb = bitcast[DType.uint32, W](cs)
+    var xb = swap.select(sb, cb) ^ (((qu + 1) << 30) & 0x80000000)
+    var yb = swap.select(cb, sb) ^ ((qu << 30) & 0x80000000)
+    return (bitcast[DType.float32, W](yb), bitcast[DType.float32, W](xb))
 
 
 @always_inline
 def normal2_f32[W: Int](a: SIMD[DType.float32, W], b: SIMD[DType.float32, W]) -> Tuple[SIMD[DType.float32, W], SIMD[DType.float32, W]]:
-    """Both halves of a Box-Muller step, cos first: z0 = r cos(2 pi b), z1 = r sin(2 pi b),
-    r = sqrt(-2 log(1 - a)). 1 - a lies in (0, 1], so the logarithm is finite. Every operation
-    is lane-wise and the polynomials use explicit fma, so any width gives the same bits."""
-    var r = sqrt(neg2_log_f32(1.0 - a))
+    """The Float32 form of normal2_f64."""
+    var r = sqrt(neg2_log_f32(a))
     var sc = sincos_2pi_f32(b)
     return (r * sc[1], r * sc[0])
 
@@ -625,8 +615,8 @@ struct Tandem(Copyable, Movable, Equatable):
 
     # Bounded integers and normals ----------------------------------------------------------
     # Not part of the specification. They follow the shared device core, tandem-cuda's
-    # core.hpp, so every port returns the same integers and f64 normals up to the last bits of
-    # log and cos. The f32 normal agrees to a few ulps only.
+    # core.hpp, so every port returns the same integers. The normals are byte identical to
+    # tandem-c and agree with the core's libm normals to a few ulps.
 
     def below_u32(mut self, n: UInt32) -> UInt32:
         """Uniform in 0..n by Lemire's multiply and reject on u32 draws. For n == 0 the result
@@ -650,7 +640,8 @@ struct Tandem(Copyable, Movable, Equatable):
     def fill_below_u32[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], count: Int, n: UInt32):
         """Element i takes draw i of the u32 fill, and the fill consumes exactly count draws
         whatever is rejected, so rows fill independently. A rejected draw retries with Lemire's
-        rule on the draws of key.sub(PURPOSE_BELOW32).split(i) at position 0. Without a
+        rule on the draws of key.sub(PURPOSE_BELOW32).split(g) at position 0, where g is the global
+        draw index, the start position over 32 plus i, so chunked fills equal whole fills. Without a
         rejection the fill equals the scalar below_u32 calls. An empty fill moves nothing.
 
         The draws come in blocks that stay in L1. A block takes the multiply-high on SIMD lanes,
@@ -665,6 +656,7 @@ struct Tandem(Copyable, Movable, Equatable):
         var nv = SIMD[DType.uint32, W](n).cast[DType.uint64]()
         var draws = stack_allocation[BLOCK, UInt32]()
         var done = 0
+        var first_draw = Int(align(self.pos, 32) // 32)
         var head = head_elements[32](align(self.pos, 32))
         while done < count:
             var m = min(BLOCK, count - done)
@@ -689,11 +681,11 @@ struct Tandem(Copyable, Movable, Equatable):
                 for k in range(m):
                     var prod = UInt64(draws.unsafe_offset(k).unsafe_load()) * UInt64(n)
                     if UInt32(prod & 0xFFFFFFFF) < t:
-                        dst.unsafe_offset(done + k).unsafe_store(below_retry_u32(self.key, self.k, n, UInt64(done + k)))
+                        dst.unsafe_offset(done + k).unsafe_store(below_retry_u32(self.key, self.k, n, UInt64(first_draw + done + k)))
             done += m
 
     def fill_below_u64[origin: Origin[mut=True]](mut self, dst: Pointer[UInt64, origin], count: Int, n: UInt64):
-        """The u64 form of fill_below_u32, with PURPOSE_BELOW64. It converts row by row, fused
+        """The u64 form of fill_below_u32, with PURPOSE_BELOW64 and g = start position / 64 + i. It converts row by row, fused
         with the row generator."""
         if count == 0:
             return
@@ -934,11 +926,11 @@ def fill_rows_below_u64(mut cur: Cursor, key: SIMD[DType.uint32, 4], K: UInt32, 
         var words = row_words(c.lanes)
         var first = row * 16
         if first >= first_el and first + 16 <= end:
-            below_row_u64(words, dst.unsafe_offset(i), bound, thresh, key, K, i)
+            below_row_u64(words, dst.unsafe_offset(i), bound, thresh, key, K, first_el + i)
             i += 16
         else:
             var lo = max(first_el, first) - first
-            below_row_u64(words, scratch.unsafe_origin_cast[MutAnyOrigin](), bound, thresh, key, K, i - lo)
+            below_row_u64(words, scratch.unsafe_origin_cast[MutAnyOrigin](), bound, thresh, key, K, first_el + i - lo)
             for j in range(lo, min(end, first + 16) - first):
                 dst.unsafe_offset(i).unsafe_store(scratch.unsafe_offset(j).unsafe_load())
                 i += 1
