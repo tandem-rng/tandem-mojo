@@ -89,5 +89,5 @@ def main() raises:
         var t0 = perf_counter_ns()
         for _ in range(n):
             sink += g.next_f64()
-        best = min(best, Float64(perf_counter_ns() - t0) / Float64(n))
-    print("cpu next_f64 chain", best, "ns per draw", sink > 0)
+        best = min(best, Float64(perf_counter_ns() - t0) * 1e-9)
+    print("cpu next_f64 chain", gibs(8 * n, best), "GiB/s", sink > 0)
