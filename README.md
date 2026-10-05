@@ -26,7 +26,7 @@ def main() raises:
     var words = unsafe_alloc[UInt32](1 << 20)
     rng.fill_u32(words, 1 << 20)
     var worker = rng.split(7)                  # by index, from the key alone
-    var z = worker.normal_f64()                # Box-Muller, byte identical to tandem-c
+    var z = worker.normal_f64()                # ziggurat, byte identical to tandem-c
 ```
 
 See [API](docs/api.md) for every draw and the GPU fills, and [tests](docs/tests.md) and

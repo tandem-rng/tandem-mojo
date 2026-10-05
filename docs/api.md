@@ -12,7 +12,7 @@ def main() raises:
     var words = unsafe_alloc[UInt32](1 << 20)
     rng.fill_u32(words, 1 << 20)
     var i = rng.below_u32(10)                  # uniform in 0..10, Lemire
-    var z = rng.normal_f64()                   # Box-Muller from two f64 draws
+    var z = rng.normal_f64()                   # ziggurat from one u64 draw
     var e = rng.exponential_f64()              # -log(1 - u), one f64 draw
     var worker = rng.split(7)                  # by index, from the key alone
     var kids = rng.fork(4)                     # from the current block, parent moves on
@@ -39,8 +39,9 @@ fill_f64_gpu(ctx, seed(42), 0, (1 << 24) // 16, 32, dev.unsafe_ptr())   # rows 0
   `fill_c64`. Each equals the scalar draws it replaces.
 - `below_u32`, `below_u64`, `fill_below_u32`, `fill_below_u64`. A fill cut into chunks equals
   the whole fill.
-- `normal_f64`, `normal_f32`, `normal2_f64`, `normal2_f32` and `fill_normal_*`. They are byte
-  identical to tandem-c.
+- `normal_f64`, `normal_f32`, `normal2_f32` and `fill_normal_*`. `f64` normals are the ziggurat
+  of Appendix A, `f32` normals Box-Muller pairs. They are byte identical to tandem-c. An empty
+  `f64` fill aligns the position to 64 bits.
 - `exponential_f64`, `exponential_f32`, `fill_exponential_f64`, `fill_exponential_f32`. They
   are byte identical to tandem-c.
 - GPU fills `fill_u32_gpu`, `fill_u64_gpu`, `fill_f32_gpu`, `fill_f64_gpu`. They take a key

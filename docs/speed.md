@@ -16,14 +16,15 @@ One thread, `pixi run bench`, minimum of seven runs of 2^24 elements, in GiB/s.
 | `fill_below_u32`, bound 1000 | 11.5 |
 | `fill_below_u64`, bound 1000 | 10.5 |
 | `fill_normal_f32` | 5.5 |
-| `fill_normal_f64` | 4.99 |
+| `fill_normal_f64` | 6.54 |
 | `next_f64` chain, ns per draw | 2.68 |
 
 The CPU fill converts floats in the same pass that stores the row. The 32-bit low word of each
 product is a plain vector multiply, and only the high word is a widening one: taking both from
 one 64-bit product made LLVM emit two widening multiplies. The bounded and normal fills do
-extra arithmetic per draw, so they run below the plain rate: the normals are limited by the
-vector pipes, not by memory.
+extra arithmetic per draw, so they run below the plain rate. The `f32` normals are limited by
+the vector pipes, not by memory. The `f64` normals spend most of their time in the fallbacks
+of the 0.43 % of draws that miss the ziggurat's inner rectangles.
 
 ## GPU
 

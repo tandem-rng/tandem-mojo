@@ -11,8 +11,8 @@
 
 ## Bounded integers
 
-- Bounded integers and standard normals are not in the specification. They follow the shared
-  device core in `tandem-cuda`, so every port returns the same integers. A bound of 0 returns 0
+- Bounded integers and standard normals follow Appendix A of the specification, which is not
+  normative, so every port returns the same integers. A bound of 0 returns 0
   after one draw. `fill_below_*` takes draw `i` of the plain fill for element `i` and consumes
   exactly one draw per element. A rejected draw retries on `sub(purpose).split(g)` of the
   key, with `g` the global draw index, the aligned start position over the draw width plus `i`,
@@ -24,13 +24,27 @@
 
 ## Normals
 
-- A normal step uses two uniforms and returns the cos half then the sin half. A scalar normal
-  is the cos half, and a normal fill is the flattened pairs, so an odd count consumes both
-  uniforms of its last pair. An empty bounded or normal fill moves nothing.
-- The normals run on SIMD lanes with the algorithm and coefficients of `tandem-c` and an
-  explicit fused multiply-add for every multiply-add, so they are byte identical to `tandem-c`
-  (same SHA-256 from `tools/dump_normals.mojo` and `tools/dump_normals.c`, checked on arm64).
-  They agree with libm to about 1e-15 in `f64`. The `f32` normal runs in `f32`.
+- `f64` normals are the 1024-layer ziggurat of Appendix A, one `u64` draw per element. Element
+  `i` of a fill comes from draw `i` of the `u64` fill, and the scalar draw equals element 0.
+  99.57 % of the draws land in an inner rectangle and cost a table lookup and a multiply. A
+  draw that misses continues on its own fallback generator, `sub(0x4e524d3634).split(g)` of the
+  key at position 0, with `g` the global draw index. So a fill cut anywhere equals the whole
+  fill, and a fill consumes exactly `n` draws. An empty `f64` fill aligns the position to 64.
+- `zig_tables.mojo` is generated from the spec's `tables/normal_f64_zig1024.json` by
+  `tools/gen_zig_tables.py`, which checks the file's SHA-256, and CI checks it is current. It
+  holds each `Float64` as its bits. The tables are read through a pointer to a global constant,
+  because indexing the constant itself copies the whole table per lookup.
+- A fill writes every candidate in one pass over 512 draws and lists the misses. The misses
+  queue across passes, and their fallbacks are seeded eight at a time on SIMD lanes, as
+  `tandem-c` does. Each fallback then computes one block per two draws.
+- An `f32` normal step uses two uniforms and returns the cos half then the sin half. A scalar
+  `f32` normal is the cos half, and an `f32` fill is the flattened pairs, so an odd count
+  consumes both uniforms of its last pair. An empty bounded or `f32` normal fill moves nothing.
+- The logarithm and the `f32` normals run on SIMD lanes with the algorithm and coefficients of
+  `tandem-c` and an explicit fused multiply-add for every multiply-add. So both kinds of normal
+  are byte identical to `tandem-c`: `tools/dump_normals.mojo` and `tools/dump_normals.c` give
+  the same SHA-256 on arm64, and the hash tests pass on Linux x86_64. The `f64` logarithm agrees
+  with libm to 2e-15. The `f32` normal runs in `f32`.
 
 ## Exponentials
 
