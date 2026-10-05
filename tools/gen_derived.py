@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Mojo fixtures for tests/test_derived.mojo from tandem-c's cross-check headers, which tandem-c
-generates from the shared device core (tandem-cuda core.hpp).
+"""Mojo fixtures for tests/test_derived.mojo from tandem-c's cross-check headers and the tandem-cuda
+fixtures that tandem-c carries.
 
     python3 tools/gen_derived.py ../tandem-c/tests > tests/derived_data.mojo
 """
@@ -66,9 +66,13 @@ for bits in (32, 64):
     out.append(ints(f"fill_below_u{bits}_bounds", f"UInt{bits}", [n for _, n, _, _ in cs]))
     out.append(ints(f"fill_below_u{bits}_want", f"UInt{bits}", [x for _, _, v, _ in cs for x in v]))
     out.append(ints(f"fill_below_u{bits}_end", "UInt64", [e for _, _, _, e in cs]))
-out.append(reals("normal_f64", "Float64", normal, "CROSS_NORMAL"))
-end64 = re.search(r"CROSS_NORMAL_END_POS = (\d+)u", normal).group(1)
-out.append(f"comptime NORMAL_F64_END: UInt64 = {end64}\n")
+# Float64 normals: entries are `{start, {values}, end_pos}`, 64 ziggurat values from the key of
+# seed 42.
+rows = cases(normal, "CROSS_NORMAL", ints=False)
+assert all(len(v) == 64 for _, v, _ in rows)
+out.append(ints("normal_f64_starts", "UInt64", [st for st, _, _ in rows]))
+out.append(f"def normal_f64_want() -> List[Float64]:\n    return [{', '.join(x for _, v, _ in rows for x in v)}]\n")
+out.append(ints("normal_f64_end", "UInt64", [e for _, _, e in rows]))
 out.append(reals("normal_f32", "Float32", normal, "CROSS_NORMALF"))
 end32 = re.search(r"CROSS_NORMALF_END_POS = (\d+)u", normal).group(1)
 out.append(f"comptime NORMAL_F32_END: UInt64 = {end32}")

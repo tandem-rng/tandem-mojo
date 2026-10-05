@@ -4,11 +4,14 @@
 # Copyright 2026 Jessica Cox. Apache License 2.0, see LICENSE.
 
 from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left
+from std.builtin.globals import global_constant
 from std.math import fma, iota, sqrt
 from std.memory import bitcast, stack_allocation
 from std.sys import bit_width_of, has_accelerator
 from max.gpu import block_dim, block_idx, thread_idx
 from max.gpu.host import DeviceContext
+
+from zig_tables import ZIG_K, ZIG_R_BITS, ZIG_W, ZIG_Y
 
 comptime CLOCK_WEYL: UInt32 = 0x9E3779B9
 comptime DOMAIN_STREAM: UInt32 = 0x9E3779B9
@@ -212,16 +215,17 @@ def to_char(raw: UInt64) -> UInt32:
     return u if u < 0xD800 else u + 0x800
 
 
-# ---- Normals on SIMD lanes -----------------------------------------------------------------
-# The algorithm and coefficients of tandem-c's normal loop, with an explicit fma for every
-# multiply-add and no other contraction, so that every port gives the same bytes. A libm call
-# per element would dominate the fill, and std.math's Float64 log is off by 1e-10.
+# ---- Logarithm and Float32 normals on SIMD lanes -------------------------------------------
+# The algorithm and coefficients of tandem-c's normal and exponential loops, with an explicit fma
+# for every multiply-add and no other contraction, so that every port gives the same bytes. A
+# libm call per element would dominate the fill, and std.math's Float64 log is off by 1e-10.
 
 @always_inline
-def neg2_log_f64[W: Int](a: SIMD[DType.float64, W]) -> SIMD[DType.float64, W]:
-    """-2 ln(1 - a) for a in [0, 1): 1 - a is exact. Its mantissa m in [1/sqrt 2, sqrt 2) comes
-    from the exponent bits, then ln m = 2 s P(s^2) with s = (m - 1) / (m + 1)."""
-    var bits = bitcast[DType.uint64, W](1.0 - a)
+def neg2_log_f64[W: Int](x: SIMD[DType.float64, W]) -> SIMD[DType.float64, W]:
+    """-2 ln x for x in (0, 1], the reference logarithm L of Appendix A. The mantissa m of x in
+    [1/sqrt 2, sqrt 2) comes from the exponent bits, then ln m = 2 s P(s^2) with
+    s = (m - 1) / (m + 1)."""
+    var bits = bitcast[DType.uint64, W](x)
     var ix = bits + 0x00095F6200000000
     var nk = (1023 - (ix >> 52).cast[DType.int64]()).cast[DType.float64]()
     var m = bitcast[DType.float64, W]((ix & 0x000FFFFFFFFFFFFF) + 0x3FE6A09E00000000)
@@ -239,50 +243,9 @@ def neg2_log_f64[W: Int](a: SIMD[DType.float64, W]) -> SIMD[DType.float64, W]:
 
 
 @always_inline
-def sincos_2pi_f64[W: Int](b: SIMD[DType.float64, W]) -> Tuple[SIMD[DType.float64, W], SIMD[DType.float64, W]]:
-    """(sin, cos) of 2 pi b for b in [0, 1). b - q/4 for the nearest quarter turn q is exact,
-    which leaves the angle th in [-pi/4, pi/4] for the polynomials."""
-    var q = (b * 4.0 + 0.5).cast[DType.int64]()
-    var f = fma(-(q.cast[DType.float64]()), 0.25, b)
-    var th = f * 6.283185307179586
-    var w = th * th
-    var hs = SIMD[DType.float64, W](1.5914650986900946e-10)
-    hs = fma(w, hs, -2.5051097984389413e-08)
-    hs = fma(w, hs, 2.755731600073921e-06)
-    hs = fma(w, hs, -0.00019841269836630226)
-    hs = fma(w, hs, 0.008333333333330813)
-    hs = fma(w, hs, -0.16666666666666669)
-    var hc = SIMD[DType.float64, W](2.0665708703855164e-09)
-    hc = fma(w, hc, -2.7555858522576447e-07)
-    hc = fma(w, hc, 2.480158263811954e-05)
-    hc = fma(w, hc, -0.0013888888882156126)
-    hc = fma(w, hc, 0.04166666666663108)
-    hc = fma(w, hc, -0.4999999999999997)
-    var sn = th * fma(w, hs, 1.0)
-    var cs = fma(w, hc, 1.0)
-    # Odd q swaps sin and cos, bit 1 of q negates the sin, and bit 1 of q + 1 the cos.
-    var qu = bitcast[DType.uint64, W](q)
-    var swap = (qu & 1).eq(1)
-    var sb = bitcast[DType.uint64, W](sn)
-    var cb = bitcast[DType.uint64, W](cs)
-    var xb = swap.select(sb, cb) ^ (((qu + 1) << 62) & 0x8000000000000000)
-    var yb = swap.select(cb, sb) ^ ((qu << 62) & 0x8000000000000000)
-    return (bitcast[DType.float64, W](yb), bitcast[DType.float64, W](xb))
-
-
-@always_inline
-def normal2_f64[W: Int](a: SIMD[DType.float64, W], b: SIMD[DType.float64, W]) -> Tuple[SIMD[DType.float64, W], SIMD[DType.float64, W]]:
-    """Both halves of a Box-Muller step, cos first: z0 = r cos(2 pi b), z1 = r sin(2 pi b),
-    r = sqrt(-2 log(1 - a)). Every operation is lane-wise, so any width gives the same bits."""
-    var r = sqrt(neg2_log_f64(a))
-    var sc = sincos_2pi_f64(b)
-    return (r * sc[1], r * sc[0])
-
-
-@always_inline
-def neg2_log_f32[W: Int](a: SIMD[DType.float32, W]) -> SIMD[DType.float32, W]:
+def neg2_log_f32[W: Int](x: SIMD[DType.float32, W]) -> SIMD[DType.float32, W]:
     """The Float32 form of neg2_log_f64."""
-    var bits = bitcast[DType.uint32, W](1.0 - a)
+    var bits = bitcast[DType.uint32, W](x)
     var ix = bits + 0x004AFB0D
     var nk = (127 - (ix >> 23).cast[DType.int32]()).cast[DType.float32]()
     var m = bitcast[DType.float32, W]((ix & 0x007FFFFF) + 0x3F3504F3)
@@ -297,8 +260,9 @@ def neg2_log_f32[W: Int](a: SIMD[DType.float32, W]) -> SIMD[DType.float32, W]:
 
 @always_inline
 def sincos_2pi_f32[W: Int](b: SIMD[DType.float32, W]) -> Tuple[SIMD[DType.float32, W], SIMD[DType.float32, W]]:
-    """The Float32 form of sincos_2pi_f64, with 2 pi as a pair of floats so that the angle is
-    good to the last bit."""
+    """(sin, cos) of 2 pi b for b in [0, 1). b - q/4 for the nearest quarter turn q is exact,
+    which leaves the angle th in [-pi/4, pi/4] for the polynomials. 2 pi is a pair of floats so
+    that the angle is good to the last bit."""
     var q = (b * 4.0 + 0.5).cast[DType.int32]()
     var f = fma(-(q.cast[DType.float32]()), 0.25, b)
     var th = fma(f, -1.7484555e-7, f * 6.2831855)
@@ -313,6 +277,7 @@ def sincos_2pi_f32[W: Int](b: SIMD[DType.float32, W]) -> Tuple[SIMD[DType.float3
     hc = fma(w, hc, -0.5)
     var sn = th * fma(w, hs, 1.0)
     var cs = fma(w, hc, 1.0)
+    # Odd q swaps sin and cos, bit 1 of q negates the sin, and bit 1 of q + 1 the cos.
     var qu = bitcast[DType.uint32, W](q)
     var swap = (qu & 1).eq(1)
     var sb = bitcast[DType.uint32, W](sn)
@@ -324,10 +289,123 @@ def sincos_2pi_f32[W: Int](b: SIMD[DType.float32, W]) -> Tuple[SIMD[DType.float3
 
 @always_inline
 def normal2_f32[W: Int](a: SIMD[DType.float32, W], b: SIMD[DType.float32, W]) -> Tuple[SIMD[DType.float32, W], SIMD[DType.float32, W]]:
-    """The Float32 form of normal2_f64."""
-    var r = sqrt(neg2_log_f32(a))
+    """Both halves of a Box-Muller step in Float32, cos first: z0 = r cos(2 pi b),
+    z1 = r sin(2 pi b), r = sqrt(-2 log(1 - a)). 1 - a is exact. Every operation is lane-wise,
+    so any width gives the same bits."""
+    var r = sqrt(neg2_log_f32(1.0 - a))
     var sc = sincos_2pi_f32(b)
     return (r * sc[1], r * sc[0])
+
+
+# ---- Float64 normals: the ziggurat ---------------------------------------------------------
+# The 1024-layer ziggurat of Appendix A, one u64 draw per element. A draw that misses the inner
+# rectangles continues on its own fallback generator, split(g) of sub(PURPOSE_NORMAL64) of the
+# key at position 0, where g is the global index of the draw. So element i depends on draw i
+# alone, and a fill cut anywhere equals the whole.
+
+comptime PURPOSE_NORMAL64: UInt64 = 0x4E524D3634
+comptime ZIG_R = bitcast[DType.float64, 1](SIMD[DType.uint64, 1](ZIG_R_BITS))[0]
+
+
+# The tables are read through a pointer, because indexing the constant itself copies all of it.
+@always_inline
+def zig_w(i: UInt64) -> Float64:
+    return Pointer(to=global_constant[ZIG_W]()).unsafe_bitcast[Float64]().unsafe_offset(Int(i)).unsafe_load()
+
+
+@always_inline
+def zig_k(i: UInt64) -> UInt64:
+    return Pointer(to=global_constant[ZIG_K]()).unsafe_bitcast[UInt64]().unsafe_offset(Int(i)).unsafe_load()
+
+
+@always_inline
+def zig_y(i: UInt64) -> Float64:
+    return Pointer(to=global_constant[ZIG_Y]()).unsafe_bitcast[Float64]().unsafe_offset(Int(i)).unsafe_load()
+
+
+@always_inline
+def zig_candidate(r: UInt64) -> Tuple[Float64, Bool]:
+    """(±ra W[i], ra < K[i]): the candidate of a draw and whether it lies in the inner rectangle.
+    ZIG_W holds -W[i] at 1024 + i, so bit 10 picks the sign by the index. ra < 2^53 converts
+    exactly."""
+    var ra = r >> 11
+    return (ra.cast[DType.int64]().cast[DType.float64]() * zig_w(r & 2047), ra < zig_k(r & 1023))
+
+
+struct Fallback(Copyable, Movable):
+    """The u64 draws of a fallback generator from its position 0. Draw d sits in row d / 16 and
+    lane (d / 2) mod 8, so each pair of draws costs one block instead of a row of eight."""
+
+    var key: SIMD[DType.uint32, 4]
+    var k: UInt64
+    var d: UInt32
+    var blk: SIMD[DType.uint32, 4]
+
+    def __init__(out self, key: SIMD[DType.uint32, 4], K: UInt32, first_block: SIMD[DType.uint32, 4]):
+        self.key = key
+        self.k = UInt64(K)
+        self.d = 0
+        self.blk = first_block
+
+    def next(mut self) -> UInt64:
+        var d = self.d
+        self.d += 1
+        if d >= 2 and (d & 1) == 0:
+            var row = UInt64(d >> 4)
+            self.blk = block(self.key, 8 * (row // self.k) + UInt64((d >> 1) & 7), UInt32(row % self.k))
+        var i = Int(2 * (d & 1))
+        return UInt64(self.blk[i]) | (UInt64(self.blk[i + 1]) << 32)
+
+
+@no_inline
+def zig_slow(r0: UInt64, mut f: Fallback) -> Float64:
+    """The slow path of a draw that missed, on its fallback f. ln is -0.5 neg2_log_f64, exact
+    given neg2_log_f64. Every other operation rounds once, with no fused multiply-add."""
+    var r = r0
+    while True:
+        var i = r & 1023
+        var c = zig_candidate(r)
+        if c[1]:
+            return c[0]
+        if i == 0:
+            # The tail beyond R, by Marsaglia's method.
+            while True:
+                var a = 0.5 * neg2_log_f64[1](1.0 - to_f64(f.next()))[0] / ZIG_R
+                var b = 0.5 * neg2_log_f64[1](1.0 - to_f64(f.next()))[0]
+                if b + b >= a * a:
+                    return -(ZIG_R + a) if ((r >> 10) & 1) == 1 else ZIG_R + a
+        var y = zig_y(i) + to_f64(f.next()) * (zig_y(i + 1) - zig_y(i))
+        if -0.5 * neg2_log_f64[1](y)[0] < -0.5 * (c[0] * c[0]):
+            return c[0]
+        r = f.next()
+
+
+def zig_resolve(dst: Pointer[Float64, MutAnyOrigin], at: Pointer[Int, MutAnyOrigin], raw: Pointer[UInt64, MutAnyOrigin], n: Int, first: UInt64, sub_key: SIMD[DType.uint32, 4], K: UInt32):
+    """Write the slow path of the misses raw[t] to dst[at[t]], whose global draw indices are
+    first + at[t]. The fallbacks of eight misses are seeded on eight lanes at once, split and the
+    first block, which costs about a quarter of eight separate seedings. A short last group
+    repeats its last index and leaves the spare lanes unused."""
+    comptime V = SIMD[DType.uint32, 8]
+    var t = 0
+    while t < n:
+        var m = min(8, n - t)
+        var g = SIMD[DType.uint64, 8](0)
+        for l in range(8):
+            g[l] = first + UInt64(at.unsafe_offset(t + min(l, m - 1)).unsafe_load())
+        var s = Lanes[8].keyed(sub_key, (g >> 1).cast[DType.uint32](), (g >> 33).cast[DType.uint32](), DOMAIN_SPLIT, 0)
+        # split keeps the hidden half for odd indices.
+        var odd = (g & 1).eq(1)
+        var k0 = odd.select(s.h0, s.o0)
+        var k1 = odd.select(s.h1, s.o1)
+        var k2 = odd.select(s.h2, s.o2)
+        var k3 = odd.select(s.h3, s.o3)
+        var b = Lanes[8](V(0), V(0), V(DOMAIN_STREAM), V(AUX_STREAM), k0, k1, k2, k3)
+        b.f()
+        b.step()
+        for l in range(m):
+            var f = Fallback(SIMD[DType.uint32, 4](k0[l], k1[l], k2[l], k3[l]), K, SIMD[DType.uint32, 4](b.o0[l], b.o1[l], b.o2[l], b.o3[l]))
+            dst.unsafe_offset(at.unsafe_offset(t + l).unsafe_load()).unsafe_store(zig_slow(raw.unsafe_offset(t + l).unsafe_load(), f))
+        t += 8
 
 
 struct Cursor(Copyable, Movable):
@@ -694,12 +772,6 @@ struct Tandem(Copyable, Movable, Equatable):
         fill_rows_below_u64(self.cur, self.key, self.k, p, count, dst.unsafe_origin_cast[MutAnyOrigin](), n, t)
         self.words_valid = False
 
-    def normal2_f64(mut self) -> SIMD[DType.float64, 2]:
-        """Both normals of one Box-Muller step from two f64 draws, cos half first."""
-        var a = self.next_f64()
-        var z = normal2_f64[1](SIMD[DType.float64, 1](a), SIMD[DType.float64, 1](self.next_f64()))
-        return SIMD[DType.float64, 2](z[0][0], z[1][0])
-
     def normal2_f32(mut self) -> SIMD[DType.float32, 2]:
         """Both normals of one Box-Muller step from two f32 draws, cos half first."""
         var a = self.next_f32()
@@ -707,53 +779,72 @@ struct Tandem(Copyable, Movable, Equatable):
         return SIMD[DType.float32, 2](z[0][0], z[1][0])
 
     def normal_f64(mut self) -> Float64:
-        """A standard normal: the cos half of normal2_f64, which consumes both draws."""
-        return self.normal2_f64()[0]
+        """A standard normal from one u64 draw by the ziggurat. It equals element 0 of
+        fill_normal_f64, and its fallback is seeded by the scalar split and block, so equal
+        scalar draws and fills check the eight-lane seeding of the fill."""
+        var g = align(self.pos, 64) >> 6
+        var r = self.next_u64()
+        var c = zig_candidate(r)
+        if c[1]:
+            return c[0]
+        var key = split(sub(self.key, PURPOSE_NORMAL64), g)
+        var f = Fallback(key, self.k, block(key, 0, 0))
+        return zig_slow(r, f)
 
     def normal_f32(mut self) -> Float32:
         """A standard normal: the cos half of normal2_f32, which consumes both draws."""
         return self.normal2_f32()[0]
 
     def fill_normal_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int):
-        """The flattened sequence of normal2_f64 calls, bit for bit. An odd count keeps the cos
+        """Element i is the ziggurat of draw i of the u64 fill, and the fill consumes count draws.
+        An empty fill aligns the position to 64 bits.
+
+        A pass over each block of draws writes every candidate and lists the misses. Misses
+        queue across blocks, so that their fallbacks are seeded eight at a time. Blocks after the
+        first start at a row, 16 draws, so that the u64 fill runs whole rows."""
+        comptime BLOCK = 512
+        var p = align(self.pos, 64)
+        self.pos = p
+        var first = p >> 6
+        var out = dst.unsafe_origin_cast[MutAnyOrigin]()
+        var draws = stack_allocation[BLOCK, UInt64]()
+        var at = stack_allocation[BLOCK + 8, Int]().unsafe_origin_cast[MutAnyOrigin]()
+        var raw = stack_allocation[BLOCK + 8, UInt64]().unsafe_origin_cast[MutAnyOrigin]()
+        var sub_key = SIMD[DType.uint32, 4](0)
+        var have_sub = False
+        var nq = 0
+        var done = 0
+        var block_len = BLOCK - Int(first & 15)
+        while done < count:
+            var m = min(block_len, count - done)
+            block_len = BLOCK
+            self.fill_u64(draws, m)
+            # Branch free: every element is written and listed, and only a miss stays listed.
+            for j in range(m):
+                var r = draws.unsafe_offset(j).unsafe_load()
+                var c = zig_candidate(r)
+                out.unsafe_offset(done + j).unsafe_store(c[0])
+                at.unsafe_offset(nq).unsafe_store(done + j)
+                raw.unsafe_offset(nq).unsafe_store(r)
+                nq += Int(not c[1])
+            done += m
+            var full = nq - nq % 8 if done < count else nq
+            if full > 0:
+                if not have_sub:
+                    sub_key = sub(self.key, PURPOSE_NORMAL64)
+                    have_sub = True
+                zig_resolve(out, at, raw, full, first, sub_key, self.k)
+                for t in range(nq - full):
+                    at.unsafe_offset(t).unsafe_store(at.unsafe_offset(full + t).unsafe_load())
+                    raw.unsafe_offset(t).unsafe_store(raw.unsafe_offset(full + t).unsafe_load())
+                nq -= full
+
+    def fill_normal_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int):
+        """The flattened sequence of normal2_f32 calls, bit for bit. An odd count keeps the cos
         half of its last pair and still consumes both draws. An empty fill moves nothing.
 
         The draws come in blocks that stay in L1. Converting each row in registers, fused with
         the row generator, spills registers and measured slower."""
-        comptime P = 4
-        comptime BLOCK = 256
-        var draws = stack_allocation[2 * BLOCK, Float64]()
-        var pairs = count // 2 + count % 2
-        var done = 0
-        var head = head_elements[64](align(self.pos, 64))
-        while pairs > 0:
-            var m = min(BLOCK, pairs)
-            if head > 1 and head % 2 == 0:
-                m = min(m, head // 2)
-            head = 0
-            self.fill_f64(draws, 2 * m)
-            var j = 0
-            while j + P <= m and done + 2 * P <= count:
-                var uv = draws.unsafe_offset(2 * j).unsafe_load[width=2 * P]().deinterleave()
-                var z = normal2_f64[P](uv[0], uv[1])
-                dst.unsafe_offset(done).unsafe_store(z[0].interleave(z[1]))
-                done += 2 * P
-                j += P
-            if j < m:
-                var padded = SIMD[DType.float64, 2 * P](0)
-                for k in range(2 * (m - j)):
-                    padded[k] = draws.unsafe_offset(2 * j + k).unsafe_load()
-                var uv = padded.deinterleave()
-                var z = normal2_f64[P](uv[0], uv[1])
-                var out = z[0].interleave(z[1])
-                for k in range(2 * (m - j)):
-                    if done < count:
-                        dst.unsafe_offset(done).unsafe_store(out[k])
-                        done += 1
-            pairs -= m
-
-    def fill_normal_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int):
-        """The flattened sequence of normal2_f32 calls, as fill_normal_f64."""
         comptime P = 8
         comptime BLOCK = 256
         var draws = stack_allocation[2 * BLOCK, Float32]()
@@ -792,11 +883,11 @@ struct Tandem(Copyable, Movable, Equatable):
 
     def exponential_f64(mut self) -> Float64:
         """An Exp(1) draw from one f64 draw."""
-        return 0.5 * neg2_log_f64[1](SIMD[DType.float64, 1](self.next_f64()))[0]
+        return 0.5 * neg2_log_f64[1](SIMD[DType.float64, 1](1.0 - self.next_f64()))[0]
 
     def exponential_f32(mut self) -> Float32:
         """An Exp(1) draw from one f32 draw, computed in f32."""
-        return 0.5 * neg2_log_f32[1](SIMD[DType.float32, 1](self.next_f32()))[0]
+        return 0.5 * neg2_log_f32[1](SIMD[DType.float32, 1](1.0 - self.next_f32()))[0]
 
     def fill_exponential_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int):
         """Element i is exponential_f64 of draw i. The uniforms go into the output in blocks
@@ -810,10 +901,10 @@ struct Tandem(Copyable, Movable, Equatable):
             self.fill_f64(p, m)
             var j = 0
             while j + W <= m:
-                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f64[W](p.unsafe_offset(j).unsafe_load[width=W]()))
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f64[W](1.0 - p.unsafe_offset(j).unsafe_load[width=W]()))
                 j += W
             while j < m:
-                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f64[1](p.unsafe_offset(j).unsafe_load[width=1]()))
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f64[1](1.0 - p.unsafe_offset(j).unsafe_load[width=1]()))
                 j += 1
             done += m
 
@@ -828,10 +919,10 @@ struct Tandem(Copyable, Movable, Equatable):
             self.fill_f32(p, m)
             var j = 0
             while j + W <= m:
-                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[W](p.unsafe_offset(j).unsafe_load[width=W]()))
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[W](1.0 - p.unsafe_offset(j).unsafe_load[width=W]()))
                 j += W
             while j < m:
-                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[1](p.unsafe_offset(j).unsafe_load[width=1]()))
+                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[1](1.0 - p.unsafe_offset(j).unsafe_load[width=1]()))
                 j += 1
             done += m
 

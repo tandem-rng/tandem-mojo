@@ -1,17 +1,16 @@
-# Bounded integers and normals agree with the shared device core, and fills agree with scalar
-# draws. The fixed values come from tandem-c's cross-check headers, which it generates from
-# tandem-cuda's core.hpp. Run: mojo run -I tests -I . tests/test_derived.mojo
+# Bounded integers, normals and exponentials agree with tandem-c's cross fixtures and the
+# tandem-cuda fixtures it carries, and fills agree with scalar draws.
+# Run: mojo run -I tests -I . tests/test_derived.mojo
 from std.ffi import external_call
 from std.math import cos, exp, log, sin, sqrt
 from std.memory.alloc import unsafe_alloc
 from std.builtin.sort import sort
 from std.testing import assert_equal, assert_true
 
-from tandem import PURPOSE_BELOW32, PURPOSE_BELOW64, Tandem, normal2_f32, normal2_f64
+from tandem import PURPOSE_BELOW32, PURPOSE_BELOW64, Tandem, neg2_log_f64, normal2_f32
 from tandem import seed
 from derived_data import (
     NORMAL_F32_END,
-    NORMAL_F64_END,
     below_u32_bounds,
     below_u32_end,
     below_u32_want,
@@ -45,7 +44,9 @@ from derived_data import (
     exponential_f64_starts,
     exponential_f64_want,
     normal_f32,
-    normal_f64,
+    normal_f64_end,
+    normal_f64_starts,
+    normal_f64_want,
 )
 
 
@@ -201,16 +202,27 @@ def test_bounded_fill_without_rejection_is_the_scalar_draws() raises:
 
 
 def test_normal_matches_tandem_c() raises:
-    """The values of tandem-c's cross_normal.h bit for bit, and its end positions."""
-    var want = normal_f64()
-    var g = start()
-    for i in range(len(want) // 2):
-        var z = g.normal2_f64()
-        for h in range(2):
-            assert_equal(z[h], want[2 * i + h], String("normal2_f64 pair ", i, " half ", h))
-    assert_equal(g.position(), NORMAL_F64_END)
+    """The values of tandem-c's cross_normal.h bit for bit, and its end positions. The f64 rows
+    start unaligned and put a wedge accept, a wedge reject and a tail at element 20. Fills and
+    scalar draws both match them."""
+    var starts = normal_f64_starts()
+    var want = normal_f64_want()
+    var end = normal_f64_end()
+    var out = unsafe_alloc[Float64](64)
+    for c in range(len(starts)):
+        var g = Tandem(42)
+        g.set_position(starts[c])
+        g.fill_normal_f64(out, 64)
+        assert_equal(g.position(), end[c])
+        var s = Tandem(42)
+        s.set_position(starts[c])
+        for i in range(64):
+            assert_equal(out.unsafe_offset(i).unsafe_load(), want[64 * c + i], String("normal_f64 fill at ", starts[c], " element ", i))
+            assert_equal(s.normal_f64(), want[64 * c + i], String("normal_f64 at ", starts[c], " element ", i))
+        assert_equal(s.position(), end[c])
+    out.unsafe_free()
     var want32 = normal_f32()
-    g = start()
+    var g = start()
     for i in range(len(want32) // 2):
         var z = g.normal2_f32()
         for h in range(2):
@@ -218,11 +230,9 @@ def test_normal_matches_tandem_c() raises:
     assert_equal(g.position(), NORMAL_F32_END)
 
 
-def test_scalar_normal_is_the_cos_half() raises:
+def test_scalar_normal_f32_is_the_cos_half() raises:
     var a = Tandem(3)
     var b = Tandem(3)
-    assert_equal(a.normal_f64(), b.normal2_f64()[0])
-    assert_true(a == b)
     assert_equal(a.normal_f32(), b.normal2_f32()[0])
     assert_true(a == b)
 
@@ -243,19 +253,17 @@ def test_normal_f32_is_box_muller_of_two_f32_draws() raises:
     assert_true(a == b)
 
 
-def test_normal_fills_are_the_flattened_pairs() raises:
-    """Lengths cross the block of the normal fill and a row. An odd count keeps the cos half of
-    its last pair and consumes both draws."""
-    for count in [0, 1, 2, 3, 127, 128, 129, 257, 300, 513, 1000]:
+def test_normal_fills_are_the_scalar_draws() raises:
+    """Lengths cross the block of the normal fill and a row. An f64 fill equals the scalar f64
+    draws, misses included. An odd f32 count keeps the cos half of its last pair and consumes
+    both draws."""
+    for count in [1, 2, 3, 127, 128, 129, 257, 300, 513, 1000, 3000]:
         var a = start()
         var b = start()
-        var got = unsafe_alloc[Float64](count + 1)
+        var got = unsafe_alloc[Float64](count)
         a.fill_normal_f64(got, count)
-        for i in range(count // 2 + count % 2):
-            var z = b.normal2_f64()
-            assert_equal(got.unsafe_offset(2 * i).unsafe_load(), z[0])
-            if 2 * i + 1 < count:
-                assert_equal(got.unsafe_offset(2 * i + 1).unsafe_load(), z[1])
+        for i in range(count):
+            assert_equal(got.unsafe_offset(i).unsafe_load(), b.normal_f64(), String("normal_f64 at ", count, " element ", i))
         assert_true(a == b, String("normal_f64 position at ", count))
         got.unsafe_free()
 
@@ -272,22 +280,43 @@ def test_normal_fills_are_the_flattened_pairs() raises:
         got32.unsafe_free()
 
 
-def test_empty_bounded_and_normal_fills_move_nothing() raises:
-    """A bounded fill advances exactly its draws and a normal fill its pairs, so an empty one
-    does not even align the position."""
+def test_empty_fills() raises:
+    """A bounded fill advances exactly its draws and an f32 normal fill its pairs, so an empty one
+    does not even align the position. An empty f64 normal fill aligns it to 64 bits, as
+    Appendix A requires."""
     for p in [1, 5, 33, 65, 1001]:
         var g = Tandem.from_key(seed(1), UInt64(p))
         g.fill_below_u32(unsafe_alloc[UInt32](1), 0, 10)
         g.fill_below_u64(unsafe_alloc[UInt64](1), 0, 10)
-        g.fill_normal_f64(unsafe_alloc[Float64](1), 0)
         g.fill_normal_f32(unsafe_alloc[Float32](1), 0)
         assert_equal(g.position(), UInt64(p))
+        g.fill_normal_f64(unsafe_alloc[Float64](1), 0)
+        assert_equal(g.position(), (UInt64(p) + 63) & ~UInt64(63))
+
+
+def test_cut_normal_f64_fills_equal_the_whole_fill() raises:
+    """The fallback is keyed by the global draw index, so the misses of fills cut at any element
+    equal those of the whole fill. 3000 draws hold about 13 misses, and the start is unaligned."""
+    var cuts = [0, 1, 15, 16, 513, 1025, 2000, 3000]
+    var whole = unsafe_alloc[Float64](3000)
+    var cut = unsafe_alloc[Float64](3000)
+    var a = Tandem.from_key(seed(42), 12345)
+    a.fill_normal_f64(whole, 3000)
+    var b = Tandem.from_key(seed(42), 12345)
+    for c in range(len(cuts) - 1):
+        b.fill_normal_f64(cut.unsafe_offset(cuts[c]), cuts[c + 1] - cuts[c])
+    for i in range(3000):
+        assert_equal(cut.unsafe_offset(i).unsafe_load(), whole.unsafe_offset(i).unsafe_load(), String("element ", i))
+    assert_true(a == b)
+    whole.unsafe_free()
+    cut.unsafe_free()
 
 
 def test_fills_match_the_cuda_fixtures() raises:
     """The fixtures of tandem-cuda: the key of seed 42, K = 32. The bounded fills hold 64 elements
     from position 0, and the ranges near 2^31 and 2^63 reject, so the fallback generator runs.
-    The normal fills hold 33 elements from several positions, which cuts rows and pairs."""
+    The normal fills hold 33 elements from several positions, which cuts rows and pairs. The f64
+    normals match bit for bit and the f32 normals, which use __sincosf on the device, to 8 ulps."""
     var r32 = cuda_below_u32_range()
     var rej32 = cuda_below_u32_rejected()
     var w32 = cuda_below_u32_want()
@@ -322,8 +351,7 @@ def test_fills_match_the_cuda_fixtures() raises:
         var out = unsafe_alloc[Float64](n[c])
         g.fill_normal_f64(out, n[c])
         for i in range(n[c]):
-            var w = want[base + i]
-            assert_true(abs(out.unsafe_offset(i).unsafe_load() - w) <= 1e-12 * abs(w), String("normal f64 pos ", pos[c], " element ", i))
+            assert_equal(out.unsafe_offset(i).unsafe_load(), want[base + i], String("normal f64 pos ", pos[c], " element ", i))
         base += n[c]
         out.unsafe_free()
     var pos32 = cuda_normal_f32_pos()
@@ -349,7 +377,8 @@ def libm_normal2(a: Float64, b: Float64) -> SIMD[DType.float64, 2]:
 
 def test_series_against_libm() raises:
     """The SIMD series against libm on 2^18 uniform pairs, including the ends of the range
-    where u = 1 - a is tiny or 1 and where cos or sin crosses zero."""
+    where u = 1 - a is tiny or 1 and where cos or sin crosses zero: the f64 logarithm, and the
+    f32 Box-Muller pair."""
     var g = Tandem(11)
     var edges = [0.0, 1.1102230246251565e-16, 0.25, 0.5, 0.75, 0.9999999999999999, 0.125, 0.375]
     var worst = Float64(0)
@@ -360,19 +389,16 @@ def test_series_against_libm() raises:
         if i < 64:
             a = edges[i % 8]
             b = edges[(i // 8) % 8]
-        var z = normal2_f64[1](SIMD[DType.float64, 1](a), SIMD[DType.float64, 1](b))
-        var want = libm_normal2(a, b)
-        # Relative above 1, absolute below: the libm reference rounds 2 pi b, which moves a zero of cos by 1e-16.
-        var e0 = abs(z[0][0] - want[0]) / max(abs(want[0]), 1.0)
-        var e1 = abs(z[1][0] - want[1]) / max(abs(want[1]), 1.0)
-        worst = max(worst, max(e0, e1))
+        var x = 1.0 - a
+        var want = -2.0 * external_call["log", Float64](x)
+        worst = max(worst, abs(neg2_log_f64[1](SIMD[DType.float64, 1](x))[0] - want) / max(abs(want), 1e-300))
         var af = min(Float32(a), Float32(0.99999994))
         var bf = Float32(b)
         var z32 = normal2_f32[1](SIMD[DType.float32, 1](af), SIMD[DType.float32, 1](bf))
         # The contract rounds u = 1 - a to f32, so the oracle starts from that u.
         var w32 = libm_normal2(1.0 - Float64(Float32(1.0) - af), Float64(bf))
         worst32 = max(worst32, max(abs(Float64(z32[0][0]) - w32[0]) / max(abs(w32[0]), 1.0), abs(Float64(z32[1][0]) - w32[1]) / max(abs(w32[1]), 1.0)))
-    assert_true(worst < 1e-13, String("f64 worst relative error ", worst))
+    assert_true(worst < 2e-15, String("f64 worst relative error ", worst))
     assert_true(worst32 < 16.0 * 1.1920929e-07, String("f32 worst error ", worst32))
 
 
@@ -411,28 +437,47 @@ def test_cut_bounded_fills_equal_the_whole_fill() raises:
     cut64.unsafe_free()
 
 
+def fnv[origin: Origin[mut=True]](h0: UInt64, bytes: Pointer[UInt8, origin], n: Int) -> UInt64:
+    var h = h0
+    for i in range(n):
+        h = (h ^ UInt64(bytes.unsafe_offset(i).unsafe_load())) * 0x100000001B3
+    return h
+
+
 def test_normal_fills_have_the_bytes_of_tandem_c() raises:
-    """The FNV-1a hash of 1e6 pairs of f64 and f32 normals from five positions, the value that
-    tandem-c's tests/test_normal_bits.c records, whose SHA-256 dump this port matches too."""
-    comptime PAIRS = 1000000
+    """FNV-1a hashes equal to those of tandem-c's tests/test_normal_bits.c: 1e6 f64 normals from
+    five positions, whose SHA-256 dump this port matches too, 2e5 f64 normals at two positions
+    of the spec's Python reference with their end positions, and 2e6 - 1 f32 normals from the
+    five positions."""
+    comptime N = 1000000
+    comptime BASIS = UInt64(0xCBF29CE484222325)
     var starts: List[UInt64] = [0, 1, 77, 12345, 1 << 30]
-    var d = unsafe_alloc[Float64](2 * PAIRS)
-    var f = unsafe_alloc[Float32](2 * PAIRS)
-    var h = UInt64(0xCBF29CE484222325)
+    var d = unsafe_alloc[Float64](N)
+    var h = BASIS
     for s in starts:
         var g = Tandem(UInt128(2026) | (UInt128(7) << 64))
         g.set_position(s)
-        g.fill_normal_f64(d, 2 * PAIRS - 1)
-        var bytes = d.unsafe_bitcast[UInt8]()
-        for i in range((2 * PAIRS - 1) * 8):
-            h = (h ^ UInt64(bytes.unsafe_offset(i).unsafe_load())) * 0x100000001B3
-        g.fill_normal_f32(f, 2 * PAIRS - 1)
-        var bytes32 = f.unsafe_bitcast[UInt8]()
-        for i in range((2 * PAIRS - 1) * 4):
-            h = (h ^ UInt64(bytes32.unsafe_offset(i).unsafe_load())) * 0x100000001B3
+        g.fill_normal_f64(d, N)
+        h = fnv(h, d.unsafe_bitcast[UInt8](), N * 8)
+    assert_equal(h, UInt64(0xA61CFA844C85F7C1))
+    var ref_starts: List[UInt64] = [0, 2373]
+    var ref_hashes: List[UInt64] = [0x0C4059ED409D578D, 0x30CE40C86B295193]
+    var ref_ends: List[UInt64] = [12800000, 12802432]
+    for c in range(2):
+        var g = Tandem.from_key(SIMD[DType.uint32, 4](1, 2, 3, 4), ref_starts[c], 32)
+        g.fill_normal_f64(d, 200000)
+        assert_equal(fnv(BASIS, d.unsafe_bitcast[UInt8](), 200000 * 8), ref_hashes[c])
+        assert_equal(g.position(), ref_ends[c])
     d.unsafe_free()
+    var f = unsafe_alloc[Float32](2 * N)
+    h = BASIS
+    for s in starts:
+        var g = Tandem(UInt128(2026) | (UInt128(7) << 64))
+        g.set_position(s)
+        g.fill_normal_f32(f, 2 * N - 1)
+        h = fnv(h, f.unsafe_bitcast[UInt8](), (2 * N - 1) * 4)
     f.unsafe_free()
-    assert_equal(h, UInt64(0x9414E1315E2653BE))
+    assert_equal(h, UInt64(0xAA1EA656CE73A4FB))
 
 
 def test_normals_have_unit_moments() raises:
@@ -613,10 +658,11 @@ def main() raises:
     test_bounded_fills_follow_the_definition()
     test_bounded_fill_without_rejection_is_the_scalar_draws()
     test_normal_matches_tandem_c()
-    test_scalar_normal_is_the_cos_half()
+    test_scalar_normal_f32_is_the_cos_half()
     test_normal_f32_is_box_muller_of_two_f32_draws()
-    test_normal_fills_are_the_flattened_pairs()
-    test_empty_bounded_and_normal_fills_move_nothing()
+    test_normal_fills_are_the_scalar_draws()
+    test_empty_fills()
+    test_cut_normal_f64_fills_equal_the_whole_fill()
     test_fills_match_the_cuda_fixtures()
     test_series_against_libm()
     test_cut_bounded_fills_equal_the_whole_fill()

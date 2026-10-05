@@ -27,13 +27,23 @@ jobs:
           git clone --depth 1 https://github.com/tandem-rng/spec ../tandem-spec
           python3 tools/gen_vectors.py ../tandem-spec/vectors.json > tests/vectors_data.mojo
           git diff --exit-code tests/vectors_data.mojo
+  zig-tables:
+    name: ziggurat tables are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          git clone --depth 1 https://github.com/tandem-rng/spec ../tandem-spec
+          python3 tools/gen_zig_tables.py ../tandem-spec/tables/normal_f64_zig1024.json > zig_tables.mojo
+          git diff --exit-code zig_tables.mojo
   derived:
     name: derived data and dumps are current
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - run: |
-          git clone --depth 1 https://github.com/tandem-rng/tandem-c ../tandem-c
+          git clone -q https://github.com/tandem-rng/tandem-c ../tandem-c
+          git -C ../tandem-c checkout -q 684e273b3766f223794130f01a1604b201de573d
           python3 tools/gen_derived.py ../tandem-c/tests > tests/derived_data.mojo
           git diff --exit-code tests/derived_data.mojo
           diff -r ../tandem-c/tests/data tests/data
