@@ -37,13 +37,16 @@ the `u64` row's figure is `curandGenerate` writing the same bytes as 32-bit word
 
 | NVIDIA A100 40 GB PCIe | GiB/s | cuRAND Philox4x32-10 | cuRAND call |
 |---|---|---|---|
-| `fill_u32_gpu` | 1189 | 1309 | `curandGenerate` |
-| `fill_u64_gpu` | 1201 | 1302 | `curandGenerate`, nearest |
-| `fill_f32_gpu` | 1171 | 1277 | `curandGenerateUniform` |
-| `fill_f64_gpu` | 1188 | 797 | `curandGenerateUniformDouble` |
+| `fill_u32_gpu` | 1379 | 1304 | `curandGenerate` |
+| `fill_u64_gpu` | 1379 | 1306 | `curandGenerate`, nearest |
+| `fill_f32_gpu` | 1378 | 1287 | `curandGenerateUniform` |
+| `fill_f64_gpu` | 1378 | 801 | `curandGenerateUniformDouble` |
 
-The GPU kernel stores each block from registers and has no shared-memory tile, so the 32-bit
-fills run below cuRAND's. tandem-cuda's tile kernel reaches 1377 to 1388 GiB/s on the same card.
+For K a multiple of 8, the default, the kernel stages eight steps of 32 groups in 32 KiB of
+shared memory and stores them as 512 contiguous bytes per warp, as tandem-cuda's tile kernel
+does, at the card's memory bandwidth. Other K take one thread per chunk with direct stores. The
+fills ran at 1171 to 1201 GiB/s before the tile and before F's round constants were unrolled:
+indexing them with the round number put them in local memory.
 
 ## Other generators
 
