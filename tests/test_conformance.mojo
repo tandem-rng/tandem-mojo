@@ -190,7 +190,8 @@ def rejections(c: Case) raises -> Int:
 
 def test_cases(file: String, count: Int) raises:
     """Every case of a file: the whole fill, the scalar draws, and fills cut at elements 1, 7,
-    20, 21 and n - 1 and run in order on one generator. The end positions follow the rules of
+    20, 21 and n - 1 (a Float32 normal: 2, 8, 20 and the largest even element
+    below n) and run in order on one generator. The end positions follow the rules of
     the appendices, and the file's own `end` agrees with them."""
     var cases = load(file)
     assert_equal(len(cases), count, file)
@@ -240,9 +241,10 @@ def test_cases(file: String, count: Int) raises:
             scalar_draws(s, kind, c, table, b, n)
             check_bits(b, kind, want, String(id, " scalar"))
             assert_equal(Int(s.position()), stop, String(id, " scalar"))
-        # A Float32 normal fill cut at an odd element drops a sin half, so only even cuts compose.
-        for cutat in [1, 7, 20, 21, n - 1]:
-            if cutat <= 0 or cutat >= n or (kind == NORMAL_F32 and cutat % 2 == 1):
+        # A Float32 normal cut must fall on a pair, so it takes the even cuts of the checklist.
+        var cuts = [2, 8, 20, 20, (n - 1) // 2 * 2] if kind == NORMAL_F32 else [1, 7, 20, 21, n - 1]
+        for cutat in cuts:
+            if cutat <= 0 or cutat >= n:
                 continue
             var h = generator(c)
             fill_piece(h, kind, c, table, b, 0, cutat)

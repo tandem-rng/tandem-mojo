@@ -29,8 +29,8 @@ pixi run test-gpu     # on a host with a supported GPU
   lengths, offsets and lengths that cut rows and chunks, and checks the position afterwards.
 - `tests/test_conformance.mojo` reads the byte copies of the spec's `conformance/*.json` in
   `tests/conformance` through `tests/conformance.mojo`, and demonstrates every item of the spec's
-  `conformance/CHECKLIST.md`. Every case of the bounded, normal, exponential and weighted
-  choice files runs as a fill, as scalar draws and cut at elements 1, 7, 20, 21 and n - 1, bit
+  `conformance/CHECKLIST.md` at b31af72. Every case of the bounded, normal, exponential and weighted
+  choice files runs as a fill, as scalar draws and cut at elements 1, 7, 20, 21 and n - 1 (`Float32` normals at 2, 8, 20 and the largest even element below n), bit
   for bit with the end position, including the `f32` normals. It builds the choice tables and
   compares `S`, `cut` and `alias`, and checks the stream and dump hashes of `hashes.json` by
   SHA-256 and FNV-1a from the key. It checks the global draw index of the fallback, the width of
@@ -48,7 +48,7 @@ pixi run test-gpu     # on a host with a supported GPU
 
 `tests/vectors_data.mojo` is generated from the spec repository's `vectors.json` by
 `tools/gen_vectors.py`. The dumps in `tests/data` are copies of `tandem-c/tests/data`.
-`tests/conformance/*.json` are byte copies of tandem-spec f420545 `conformance/*.json`.
+`tests/conformance/*.json` are byte copies of tandem-spec b31af72 `conformance/*.json`.
 `tools/gen_zig_tables.py` writes
 `zig_tables.mojo` from the spec's `tables/normal_f64_zig1024.json`. CI checks all of them.
 `mojo run -I . tools/dump_normals.mojo out.bin` writes the bytes of `tandem-c`'s
