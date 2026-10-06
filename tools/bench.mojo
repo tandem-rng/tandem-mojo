@@ -98,6 +98,25 @@ def row[which: Int](name: String, bytes: Int, mut g: Tandem, b: Buffers):
     print("cpu", name, "2^24 elements", ours, "GiB/s, baseline", theirs, "GiB/s")
 
 
+def chain[ours: Bool](n: Int) raises -> Float64:
+    """The best of eight timed chains of n scalar f64 draws on a fresh generator."""
+    var r = Tandem.from_key(seed(42), 0)
+    var sink = Float64(0)
+    var t = Float64.MAX
+    for _ in range(8):
+        r.set_position(0)
+        var t0 = perf_counter_ns()
+        for _ in range(n):
+            comptime if ours:
+                sink += r.next_f64()
+            else:
+                sink += random_float64()
+        t = min(t, Float64(perf_counter_ns() - t0) * 1e-9)
+    if sink < 0:
+        print(sink)
+    return t
+
+
 def main() raises:
     var b = Buffers(N)
     var g = Tandem.from_key(seed(42), 0)
@@ -111,17 +130,6 @@ def main() raises:
     row[7]("fill_normal_f64", 8, g, b)
 
     # Scalar chains: Tandem's next_f64 against std.random.random_float64.
-    var sink = Float64(0)
-    var ours = Float64.MAX
-    var theirs = Float64.MAX
-    for _ in range(8):
-        g.set_position(0)
-        var t0 = perf_counter_ns()
-        for _ in range(N):
-            sink += g.next_f64()
-        ours = min(ours, Float64(perf_counter_ns() - t0) * 1e-9)
-        t0 = perf_counter_ns()
-        for _ in range(N):
-            sink += random_float64()
-        theirs = min(theirs, Float64(perf_counter_ns() - t0) * 1e-9)
-    print("cpu next_f64 chain", gibs(8 * N, ours), "GiB/s, baseline", gibs(8 * N, theirs), "GiB/s", sink > 0)
+    var ours = chain[True](N)
+    var theirs = chain[False](N)
+    print("cpu next_f64 chain", gibs(8 * N, ours), "GiB/s, baseline", gibs(8 * N, theirs), "GiB/s")
