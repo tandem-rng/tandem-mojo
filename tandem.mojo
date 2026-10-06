@@ -7,7 +7,7 @@ from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left
 from std.builtin.globals import global_constant
 from std.math import fma, iota, sqrt
 from std.memory import bitcast, stack_allocation
-from std.sys import bit_width_of, has_accelerator
+from std.sys import bit_width_of, has_accelerator, is_gpu
 from max.gpu import barrier, block_dim, block_idx, thread_idx
 from max.gpu.host import DeviceContext
 from max.gpu.memory import AddressSpace
@@ -92,15 +92,25 @@ struct Lanes[W: Int](Copyable, Movable):
 
     @always_inline
     def f(mut self):
-        """The seeding function F: eight rounds of T, a round constant, and a half swap."""
+        """The seeding function F: eight rounds of T, a round constant, and a half swap. The
+        rounds unroll on the GPU only: on the CPU the unrolled copy inlines into the row seek of
+        every scalar draw and cost the next_f64 chain a third of its speed."""
 
-        comptime for r in range(8):
-            self.step()
-            self.o0 ^= RC[r]
-            self.o0, self.h0 = self.h0, self.o0
-            self.o1, self.h1 = self.h1, self.o1
-            self.o2, self.h2 = self.h2, self.o2
-            self.o3, self.h3 = self.h3, self.o3
+        comptime if is_gpu():
+            comptime for r in range(8):
+                self.round(RC[r])
+        else:
+            for r in range(8):
+                self.round(RC[r])
+
+    @always_inline
+    def round(mut self, rc: UInt32):
+        self.step()
+        self.o0 ^= rc
+        self.o0, self.h0 = self.h0, self.o0
+        self.o1, self.h1 = self.h1, self.o1
+        self.o2, self.h2 = self.h2, self.o2
+        self.o3, self.h3 = self.h3, self.o3
 
     @staticmethod
     @always_inline
