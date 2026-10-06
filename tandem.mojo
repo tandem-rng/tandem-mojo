@@ -516,11 +516,12 @@ struct Tandem(Copyable, Movable, Equatable):
     def read[w: Int](mut self, p: UInt64) -> UInt64:
         """w bits (a power of two up to 64) at the aligned position p."""
         self.load_row(p >> 10)
-        var i = Int((p >> 5) & 31)
+        # A load through a pointer: indexing the 32-wide vector by a runtime index spills it.
+        var at = Pointer(to=self.words).unsafe_bitcast[UInt32]().unsafe_offset(Int((p >> 5) & 31))
         comptime if w == 64:
-            return UInt64(self.words[i]) | (UInt64(self.words[i + 1]) << 32)
+            return at.unsafe_bitcast[UInt64]().unsafe_load()
         else:
-            return UInt64((self.words[i] >> UInt32(p & 31)) & (UInt32.MAX >> UInt32(32 - w)))
+            return UInt64((at.unsafe_load() >> UInt32(p & 31)) & (UInt32.MAX >> UInt32(32 - w)))
 
     @always_inline
     def next[w: Int](mut self) -> UInt64:
