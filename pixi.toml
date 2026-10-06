@@ -14,7 +14,7 @@ libcurand = "*"
 cuda-cudart = "*"
 
 [tasks]
-test = "mojo run -I . tests/test_tandem.mojo && mojo run -I . -I tests tests/test_fills.mojo && mojo run -I . -I tests tests/test_vectors.mojo && mojo run -I . -I tests tests/test_dumps.mojo && mojo run -I . -I tests tests/test_derived.mojo"
+test = "mojo run -I . tests/test_tandem.mojo && mojo run -I . -I tests tests/test_fills.mojo && mojo run -I . -I tests tests/test_vectors.mojo && mojo run -I . -I tests tests/test_dumps.mojo && mojo run -I . -I tests tests/test_derived.mojo && mojo run -I . -I tests tests/test_conformance.mojo"
 bench = "mojo run -I . tools/bench.mojo"
 bench-exponential = "mojo run -I . tools/bench_exponential.mojo"
 test-gpu = "mojo run -I . tests/test_gpu.mojo"

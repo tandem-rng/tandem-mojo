@@ -26,8 +26,9 @@ def lengths() -> List[Int]:
 
 
 def starts() -> List[UInt64]:
-    """The last two pass 2^63, where a 1-bit element index leaves the range of Int."""
-    return [0, 1, 7, 33, 100, 1000, 1023, 1024, 5000, (1 << 63) + 5, (1 << 64) - (1 << 17)]
+    """A constructor takes positions below 2^63, so the last two fills cross 2^63, where a 1-bit
+    element index leaves the range of Int, and the second draw of a pair of calls starts past it."""
+    return [0, 1, 7, 33, 100, 1000, 1023, 1024, 5000, (1 << 63) - 5, (1 << 63) - 1000]
 
 
 def chunks() -> List[Int]:

@@ -1,5 +1,6 @@
-# Bounded integers, normals and exponentials agree with tandem-c's cross fixtures and the
-# tandem-cuda fixtures it carries, and fills agree with scalar draws.
+# Bounded integers, normals and exponentials against their definitions, and long fills against
+# the scalar draws and cut into pieces. The fixtures of tandem-c and tandem-cuda are in
+# test_conformance.mojo.
 # Run: mojo run -I tests -I . tests/test_derived.mojo
 from std.ffi import external_call
 from std.math import cos, exp, log, sin, sqrt
@@ -9,45 +10,6 @@ from std.testing import assert_equal, assert_true
 
 from tandem import PURPOSE_BELOW32, PURPOSE_BELOW64, Tandem, neg2_log_f64, normal2_f32
 from tandem import seed
-from derived_data import (
-    NORMAL_F32_END,
-    below_u32_bounds,
-    below_u32_end,
-    below_u32_want,
-    below_u64_bounds,
-    below_u64_end,
-    below_u64_want,
-    fill_below_u32_bounds,
-    fill_below_u32_end,
-    fill_below_u32_starts,
-    fill_below_u32_want,
-    fill_below_u64_bounds,
-    fill_below_u64_end,
-    fill_below_u64_starts,
-    fill_below_u64_want,
-    cuda_below_u32_range,
-    cuda_below_u32_rejected,
-    cuda_below_u32_want,
-    cuda_below_u64_range,
-    cuda_below_u64_rejected,
-    cuda_below_u64_want,
-    cuda_normal_f32_n,
-    cuda_normal_f32_pos,
-    cuda_normal_f32_want,
-    cuda_normal_f64_n,
-    cuda_normal_f64_pos,
-    cuda_normal_f64_want,
-    exponential_f32_end,
-    exponential_f32_starts,
-    exponential_f32_want,
-    exponential_f64_end,
-    exponential_f64_starts,
-    exponential_f64_want,
-    normal_f32,
-    normal_f64_end,
-    normal_f64_starts,
-    normal_f64_want,
-)
 
 
 def start() raises -> Tandem:
@@ -55,70 +17,6 @@ def start() raises -> Tandem:
     var g = Tandem(42)
     _ = g.next_bool()
     return g^
-
-
-def test_below_matches_the_device_core() raises:
-    var n32 = below_u32_bounds()
-    var want32 = below_u32_want()
-    var end32 = below_u32_end()
-    for c in range(len(n32)):
-        var g = start()
-        for i in range(64):
-            assert_equal(g.below_u32(n32[c]), want32[64 * c + i], String("below_u32 bound ", n32[c], " element ", i))
-        assert_equal(g.position(), end32[c])
-    var n64 = below_u64_bounds()
-    var want64 = below_u64_want()
-    var end64 = below_u64_end()
-    for c in range(len(n64)):
-        var g = start()
-        for i in range(64):
-            assert_equal(g.below_u64(n64[c]), want64[64 * c + i], String("below_u64 bound ", n64[c], " element ", i))
-        assert_equal(g.position(), end64[c])
-
-
-def test_fill_below_matches_the_device_core() raises:
-    """The starts 0, 1 and 12345 bits give the global draw indices 0, 1 and 386 (193 for u64), so the
-    fallback key differs from the element index. The large bounds reject often in 64 elements."""
-    var s32 = fill_below_u32_starts()
-    var n32 = fill_below_u32_bounds()
-    var want32 = fill_below_u32_want()
-    var end32 = fill_below_u32_end()
-    var differs = 0
-    for c in range(len(n32)):
-        var g = Tandem.from_key(seed(42), s32[c])
-        var scalar = g.copy()
-        var out = unsafe_alloc[UInt32](64)
-        g.fill_below_u32(out, 64, n32[c])
-        for i in range(64):
-            assert_equal(out.unsafe_offset(i).unsafe_load(), want32[64 * c + i], String("fill_below_u32 bound ", n32[c], " element ", i))
-            if out.unsafe_offset(i).unsafe_load() != scalar.below_u32(n32[c]):
-                differs += 1
-        assert_equal(g.position(), end32[c])
-        out.unsafe_free()
-    assert_true(differs > 0)
-    var s64 = fill_below_u64_starts()
-    var n64 = fill_below_u64_bounds()
-    var want64 = fill_below_u64_want()
-    var end64 = fill_below_u64_end()
-    for c in range(len(n64)):
-        var g = Tandem.from_key(seed(42), s64[c])
-        var out = unsafe_alloc[UInt64](64)
-        g.fill_below_u64(out, 64, n64[c])
-        for i in range(64):
-            assert_equal(out.unsafe_offset(i).unsafe_load(), want64[64 * c + i], String("fill_below_u64 bound ", n64[c], " element ", i))
-        assert_equal(g.position(), end64[c])
-        out.unsafe_free()
-
-
-def test_bound_zero_returns_zero_after_one_draw() raises:
-    var a = Tandem(3)
-    var b = Tandem(3)
-    assert_equal(a.below_u32(0), UInt32(0))
-    _ = b.next_u32()
-    assert_true(a == b)
-    assert_equal(a.below_u64(0), UInt64(0))
-    _ = b.next_u64()
-    assert_true(a == b)
 
 
 def below_by_definition[bits: Int](rng: Tandem, raw: List[UInt64], n: UInt64, first: Int) raises -> List[UInt64]:
@@ -201,42 +99,6 @@ def test_bounded_fill_without_rejection_is_the_scalar_draws() raises:
     got.unsafe_free()
 
 
-def test_normal_matches_tandem_c() raises:
-    """The values of tandem-c's cross_normal.h bit for bit, and its end positions. The f64 rows
-    start unaligned and put a wedge accept, a wedge reject and a tail at element 20. Fills and
-    scalar draws both match them."""
-    var starts = normal_f64_starts()
-    var want = normal_f64_want()
-    var end = normal_f64_end()
-    var out = unsafe_alloc[Float64](64)
-    for c in range(len(starts)):
-        var g = Tandem(42)
-        g.set_position(starts[c])
-        g.fill_normal_f64(out, 64)
-        assert_equal(g.position(), end[c])
-        var s = Tandem(42)
-        s.set_position(starts[c])
-        for i in range(64):
-            assert_equal(out.unsafe_offset(i).unsafe_load(), want[64 * c + i], String("normal_f64 fill at ", starts[c], " element ", i))
-            assert_equal(s.normal_f64(), want[64 * c + i], String("normal_f64 at ", starts[c], " element ", i))
-        assert_equal(s.position(), end[c])
-    out.unsafe_free()
-    var want32 = normal_f32()
-    var g = start()
-    for i in range(len(want32) // 2):
-        var z = g.normal2_f32()
-        for h in range(2):
-            assert_equal(z[h], want32[2 * i + h], String("normal2_f32 pair ", i, " half ", h))
-    assert_equal(g.position(), NORMAL_F32_END)
-
-
-def test_scalar_normal_f32_is_the_cos_half() raises:
-    var a = Tandem(3)
-    var b = Tandem(3)
-    assert_equal(a.normal_f32(), b.normal2_f32()[0])
-    assert_true(a == b)
-
-
 def test_normal_f32_is_box_muller_of_two_f32_draws() raises:
     """The oracle is the exact formula in f64 on the same two draws, for both halves."""
     var a = start()
@@ -312,63 +174,6 @@ def test_cut_normal_f64_fills_equal_the_whole_fill() raises:
     cut.unsafe_free()
 
 
-def test_fills_match_the_cuda_fixtures() raises:
-    """The fixtures of tandem-cuda: the key of seed 42, K = 32. The bounded fills hold 64 elements
-    from position 0, and the ranges near 2^31 and 2^63 reject, so the fallback generator runs.
-    The normal fills hold 33 elements from several positions, which cuts rows and pairs. The f64
-    normals match bit for bit and the f32 normals, which use __sincosf on the device, to 8 ulps."""
-    var r32 = cuda_below_u32_range()
-    var rej32 = cuda_below_u32_rejected()
-    var w32 = cuda_below_u32_want()
-    var rejecting = 0
-    for c in range(len(r32)):
-        var g = Tandem.from_key(seed(42), 0)
-        var out = unsafe_alloc[UInt32](64)
-        g.fill_below_u32(out, 64, r32[c])
-        for i in range(64):
-            assert_equal(out.unsafe_offset(i).unsafe_load(), w32[64 * c + i], String("below_u32 range ", r32[c], " element ", i))
-        out.unsafe_free()
-        rejecting += rej32[c]
-    var r64 = cuda_below_u64_range()
-    var rej64 = cuda_below_u64_rejected()
-    var w64 = cuda_below_u64_want()
-    for c in range(len(r64)):
-        var g = Tandem.from_key(seed(42), 0)
-        var out = unsafe_alloc[UInt64](64)
-        g.fill_below_u64(out, 64, r64[c])
-        for i in range(64):
-            assert_equal(out.unsafe_offset(i).unsafe_load(), w64[64 * c + i], String("below_u64 range ", r64[c], " element ", i))
-        out.unsafe_free()
-        rejecting += rej64[c]
-    assert_true(rejecting > 0)
-
-    var pos = cuda_normal_f64_pos()
-    var n = cuda_normal_f64_n()
-    var want = cuda_normal_f64_want()
-    var base = 0
-    for c in range(len(pos)):
-        var g = Tandem.from_key(seed(42), pos[c])
-        var out = unsafe_alloc[Float64](n[c])
-        g.fill_normal_f64(out, n[c])
-        for i in range(n[c]):
-            assert_equal(out.unsafe_offset(i).unsafe_load(), want[base + i], String("normal f64 pos ", pos[c], " element ", i))
-        base += n[c]
-        out.unsafe_free()
-    var pos32 = cuda_normal_f32_pos()
-    var n32 = cuda_normal_f32_n()
-    var want32 = cuda_normal_f32_want()
-    base = 0
-    for c in range(len(pos32)):
-        var g = Tandem.from_key(seed(42), pos32[c])
-        var out = unsafe_alloc[Float32](n32[c])
-        g.fill_normal_f32(out, n32[c])
-        for i in range(n32[c]):
-            var w = want32[base + i]
-            assert_true(abs(out.unsafe_offset(i).unsafe_load() - w) <= 8.0 * 1.1920929e-07 * abs(w) + 1e-6, String("normal f32 pos ", pos32[c], " element ", i))
-        base += n32[c]
-        out.unsafe_free()
-
-
 def libm_normal2(a: Float64, b: Float64) -> SIMD[DType.float64, 2]:
     var r = sqrt(-2.0 * external_call["log", Float64](1.0 - a))
     var angle = 6.283185307179586 * b
@@ -437,49 +242,6 @@ def test_cut_bounded_fills_equal_the_whole_fill() raises:
     cut64.unsafe_free()
 
 
-def fnv[origin: Origin[mut=True]](h0: UInt64, bytes: Pointer[UInt8, origin], n: Int) -> UInt64:
-    var h = h0
-    for i in range(n):
-        h = (h ^ UInt64(bytes.unsafe_offset(i).unsafe_load())) * 0x100000001B3
-    return h
-
-
-def test_normal_fills_have_the_bytes_of_tandem_c() raises:
-    """FNV-1a hashes equal to those of tandem-c's tests/test_normal_bits.c: 1e6 f64 normals from
-    five positions, whose SHA-256 dump this port matches too, 2e5 f64 normals at two positions
-    of the spec's Python reference with their end positions, and 2e6 - 1 f32 normals from the
-    five positions."""
-    comptime N = 1000000
-    comptime BASIS = UInt64(0xCBF29CE484222325)
-    var starts: List[UInt64] = [0, 1, 77, 12345, 1 << 30]
-    var d = unsafe_alloc[Float64](N)
-    var h = BASIS
-    for s in starts:
-        var g = Tandem(UInt128(2026) | (UInt128(7) << 64))
-        g.set_position(s)
-        g.fill_normal_f64(d, N)
-        h = fnv(h, d.unsafe_bitcast[UInt8](), N * 8)
-    assert_equal(h, UInt64(0xA61CFA844C85F7C1))
-    var ref_starts: List[UInt64] = [0, 2373]
-    var ref_hashes: List[UInt64] = [0x0C4059ED409D578D, 0x30CE40C86B295193]
-    var ref_ends: List[UInt64] = [12800000, 12802432]
-    for c in range(2):
-        var g = Tandem.from_key(SIMD[DType.uint32, 4](1, 2, 3, 4), ref_starts[c], 32)
-        g.fill_normal_f64(d, 200000)
-        assert_equal(fnv(BASIS, d.unsafe_bitcast[UInt8](), 200000 * 8), ref_hashes[c])
-        assert_equal(g.position(), ref_ends[c])
-    d.unsafe_free()
-    var f = unsafe_alloc[Float32](2 * N)
-    h = BASIS
-    for s in starts:
-        var g = Tandem(UInt128(2026) | (UInt128(7) << 64))
-        g.set_position(s)
-        g.fill_normal_f32(f, 2 * N - 1)
-        h = fnv(h, f.unsafe_bitcast[UInt8](), (2 * N - 1) * 4)
-    f.unsafe_free()
-    assert_equal(h, UInt64(0xAA1EA656CE73A4FB))
-
-
 def test_normals_have_unit_moments() raises:
     """Mean 0 and variance 1 to within 5 standard errors of 2^20 draws."""
     var n = 1 << 20
@@ -503,63 +265,6 @@ def test_normals_have_unit_moments() raises:
         assert_true(abs(variance - 1.0) < 5.0 * sqrt(2.0 / Float64(n)), String("variance ", variance, " kind ", which))
     z.unsafe_free()
     y.unsafe_free()
-
-
-def test_exponentials_have_the_bytes_of_tandem_c() raises:
-    """The fixture of tandem-c's tests/cross_exponential.h, bit for bit: a fill of 64 from five
-    positions of the key of seed 42 and the scalar draws agree with it and with each other."""
-    var starts = exponential_f64_starts()
-    var want = exponential_f64_want()
-    var end = exponential_f64_end()
-    for c in range(len(starts)):
-        var a = Tandem.from_key(seed(42), starts[c])
-        var b = a.copy()
-        var got = unsafe_alloc[Float64](64)
-        a.fill_exponential_f64(got, 64)
-        for i in range(64):
-            assert_equal(got.unsafe_offset(i).unsafe_load(), want[64 * c + i], String("f64 fill start ", starts[c], " element ", i))
-            assert_equal(b.exponential_f64(), want[64 * c + i], String("f64 draw start ", starts[c], " element ", i))
-        assert_equal(a.position(), end[c])
-        assert_equal(b.position(), end[c])
-        got.unsafe_free()
-    var starts32 = exponential_f32_starts()
-    var want32 = exponential_f32_want()
-    var end32 = exponential_f32_end()
-    for c in range(len(starts32)):
-        var a = Tandem.from_key(seed(42), starts32[c])
-        var b = a.copy()
-        var got = unsafe_alloc[Float32](64)
-        a.fill_exponential_f32(got, 64)
-        for i in range(64):
-            assert_equal(got.unsafe_offset(i).unsafe_load(), want32[64 * c + i], String("f32 fill start ", starts32[c], " element ", i))
-            assert_equal(b.exponential_f32(), want32[64 * c + i], String("f32 draw start ", starts32[c], " element ", i))
-        assert_equal(a.position(), end32[c])
-        assert_equal(b.position(), end32[c])
-        got.unsafe_free()
-
-
-def test_exponential_fills_have_the_hash_of_tandem_c() raises:
-    """The FNV-1a hash of 1e6 f64 then 1e6 f32 exponentials from five positions, the value that
-    tandem-c's tests/test_exponential_bits.c records."""
-    comptime N = 1000000
-    var starts: List[UInt64] = [0, 1, 77, 12345, 1 << 30]
-    var d = unsafe_alloc[Float64](N)
-    var f = unsafe_alloc[Float32](N)
-    var h = UInt64(0xCBF29CE484222325)
-    for s in starts:
-        var g = Tandem(UInt128(2026) | (UInt128(7) << 64))
-        g.set_position(s)
-        g.fill_exponential_f64(d, N)
-        var bytes = d.unsafe_bitcast[UInt8]()
-        for i in range(N * 8):
-            h = (h ^ UInt64(bytes.unsafe_offset(i).unsafe_load())) * 0x100000001B3
-        g.fill_exponential_f32(f, N)
-        var bytes32 = f.unsafe_bitcast[UInt8]()
-        for i in range(N * 4):
-            h = (h ^ UInt64(bytes32.unsafe_offset(i).unsafe_load())) * 0x100000001B3
-    d.unsafe_free()
-    f.unsafe_free()
-    assert_equal(h, UInt64(0x47F8F98297D94EE2))
 
 
 def test_cut_exponential_fills_equal_the_whole_fill() raises:
@@ -596,14 +301,6 @@ def test_cut_exponential_fills_equal_the_whole_fill() raises:
     assert_true(d == f)
     whole32.unsafe_free()
     cut32.unsafe_free()
-
-
-def test_empty_exponential_fills_move_nothing() raises:
-    for p in [1, 5, 33, 65, 1001]:
-        var g = Tandem.from_key(seed(1), UInt64(p))
-        g.fill_exponential_f64(unsafe_alloc[Float64](1), 0)
-        g.fill_exponential_f32(unsafe_alloc[Float32](1), 0)
-        assert_equal(g.position(), UInt64(p))
 
 
 def check_exp1[T: DType](mut x: List[Scalar[T]]) raises:
@@ -652,25 +349,15 @@ def test_exponentials_are_exp1() raises:
 
 
 def main() raises:
-    test_below_matches_the_device_core()
-    test_fill_below_matches_the_device_core()
-    test_bound_zero_returns_zero_after_one_draw()
     test_bounded_fills_follow_the_definition()
     test_bounded_fill_without_rejection_is_the_scalar_draws()
-    test_normal_matches_tandem_c()
-    test_scalar_normal_f32_is_the_cos_half()
     test_normal_f32_is_box_muller_of_two_f32_draws()
     test_normal_fills_are_the_scalar_draws()
     test_empty_fills()
     test_cut_normal_f64_fills_equal_the_whole_fill()
-    test_fills_match_the_cuda_fixtures()
     test_series_against_libm()
     test_cut_bounded_fills_equal_the_whole_fill()
-    test_normal_fills_have_the_bytes_of_tandem_c()
     test_normals_have_unit_moments()
-    test_exponentials_have_the_bytes_of_tandem_c()
-    test_exponential_fills_have_the_hash_of_tandem_c()
     test_cut_exponential_fills_equal_the_whole_fill()
-    test_empty_exponential_fills_move_nothing()
     test_exponentials_are_exp1()
     print("mojo derived: ok")

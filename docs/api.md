@@ -4,7 +4,7 @@
 
 ```mojo
 from std.memory.alloc import unsafe_alloc
-from tandem import Tandem
+from tandem import ChoiceTable, Tandem
 
 def main() raises:
     var rng = Tandem(42)                       # 128-bit seed, default K
@@ -14,6 +14,8 @@ def main() raises:
     var i = rng.below_u32(10)                  # uniform in 0..10, Lemire
     var z = rng.normal_f64()                   # ziggurat from one u64 draw
     var e = rng.exponential_f64()              # -log(1 - u), one f64 draw
+    var table = ChoiceTable([1.0, 2.0, 3.0])   # alias table of weights
+    var k = rng.choice(table)                  # index in 0..3, one u64 draw
     var worker = rng.split(7)                  # by index, from the key alone
     var kids = rng.fork(4)                     # from the current block, parent moves on
 ```
@@ -44,6 +46,13 @@ fill_f64_gpu(ctx, seed(42), 0, (1 << 24) // 16, 32, dev.unsafe_ptr())   # rows 0
   `f64` fill aligns the position to 64 bits.
 - `exponential_f64`, `exponential_f32`, `fill_exponential_f64`, `fill_exponential_f32`. They
   are byte identical to tandem-c.
+- `ChoiceTable(weights)` builds the alias table of Appendix C from a `List[Float64]` and raises
+  unless the weights are finite, not negative and not all zero. `choice(table)` and
+  `fill_choice(dst, n, table)` return `UInt32` indices, one 64-bit draw each with no retry, so a
+  fill cut anywhere equals the whole fill. An empty fill aligns the position to 64 bits.
+- Positions stay below 2^63: `from_key` and `set_position` raise otherwise and change nothing.
+  A fill that would end at or beyond bit 2^64 raises before it writes or moves, so every fill
+  raises.
 - GPU fills `fill_u32_gpu`, `fill_u64_gpu`, `fill_f32_gpu`, `fill_f64_gpu`. They take a key
   and a row range, write whole rows and agree with the CPU fill from bit position
   `1024 * first_row`.

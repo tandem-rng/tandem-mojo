@@ -11,7 +11,8 @@ pixi run test-gpu     # on a host with a supported GPU
 - Long fills, scalar draws and random access against the dumps in `tests/data`, copied from
   `tandem-c/tests/data`.
 - Fills against the scalar draws at offsets and lengths that cut rows and chunks.
-- Bounded integers, normals and exponentials against the tandem-c cross fixtures and hashes.
+- The conformance files of the spec: bounded integers, normals, exponentials and weighted choice,
+  with the stream and dump hashes.
 - GPU fills against the CPU fills.
 
 ### Files
@@ -26,23 +27,20 @@ pixi run test-gpu     # on a host with a supported GPU
   `set_position`, chunk lengths, split, sub and fork.
 - `tests/test_fills.mojo` compares every fill with the scalar draws of its type, at chunk
   lengths, offsets and lengths that cut rows and chunks, and checks the position afterwards.
-- `tests/test_derived.mojo` compares bounded integers and normals with the cross-check values
-  of `tandem-c`, and the bounded and normal fills with the fill fixtures of `tandem-cuda` that
-  `tandem-c` carries (`tools/gen_derived.py` converts both), the bounded ones from the starts
-  0, 1 and 12345 bits. The `f64` normal rows start unaligned and hold a wedge accept, a wedge
-  reject and a tail, for fills and scalar draws, bit for bit. It checks the bounded fills
-  against their definition, at every length that cuts a SIMD block, and cut into chunks against
-  the whole fill with rejections. It checks the `f64` normal fills against the scalar draws and
-  cut into chunks against the whole fill, the `f32` normal fills against the flattened pairs,
-  the logarithm and the `f32` series against libm over 2^18 values and the edges of the range,
-  and the moments of the normals. It compares FNV-1a hashes with `tandem-c`'s: 1e6 `f64`
-  normals from five positions, 2e5 `f64` normals at two positions of the spec's Python
-  reference with their end positions, and 2e6 - 1 `f32` normals from five positions. It checks
-  that an empty bounded or `f32` fill moves nothing and an empty `f64` fill aligns to 64. It checks the exponentials against
-  `tandem-c`'s `cross_exponential.h` bit for bit, the hash of 1e6 values of each width from
-  five positions, fills cut across the L1 block against the whole fill and the scalar draws,
-  that an empty fill moves nothing, and the moments to the fourth order and the KS distance of
-  1e7 draws of each width against Exp(1).
+- `tests/test_conformance.mojo` reads the byte copies of the spec's `conformance/*.json` in
+  `tests/conformance` through `tests/conformance.mojo`, and demonstrates every item of the spec's
+  `conformance/CHECKLIST.md`. Every case of the bounded, normal, exponential and weighted
+  choice files runs as a fill, as scalar draws and cut at elements 1, 7, 20, 21 and n - 1, bit
+  for bit with the end position, including the `f32` normals. It builds the choice tables and
+  compares `S`, `cut` and `alias`, and checks the stream and dump hashes of `hashes.json` by
+  SHA-256 and FNV-1a from the key. It checks the global draw index of the fallback, the width of
+  the bounded draws, empty fills, the pair rule and odd `n` of the `f32` normals, rejected choice
+  weights and the choice law, random access, a complex draw across a block, and the position
+  bounds.
+- `tests/test_derived.mojo` checks the bounded fills against their definition at every length
+  that cuts a SIMD block, long `f64` normal, bounded and exponential fills cut into chunks, the
+  `f32` normals against the exact formula, the logarithm and the `f32` series against libm,
+  and the moments of the normals and the moments and KS distance of 1e7 exponentials.
 - `tests/test_gpu.mojo` compares the GPU fills with the CPU fills over chunk lengths and row
   ranges, and with the dump.
 
@@ -50,8 +48,8 @@ pixi run test-gpu     # on a host with a supported GPU
 
 `tests/vectors_data.mojo` is generated from the spec repository's `vectors.json` by
 `tools/gen_vectors.py`. The dumps in `tests/data` are copies of `tandem-c/tests/data`.
-`tools/gen_derived.py` converts the cross-check values of `tandem-c` and the fill fixtures of
-`tandem-cuda` that `tandem-c` carries, from `tandem-c` 684e273. `tools/gen_zig_tables.py` writes
+`tests/conformance/*.json` are byte copies of tandem-spec f420545 `conformance/*.json`.
+`tools/gen_zig_tables.py` writes
 `zig_tables.mojo` from the spec's `tables/normal_f64_zig1024.json`. CI checks all of them.
 `mojo run -I . tools/dump_normals.mojo out.bin` writes the bytes of `tandem-c`'s
 `tools/dump_normals.c`, SHA-256
@@ -60,4 +58,4 @@ pixi run test-gpu     # on a host with a supported GPU
 ## CI
 
 - CI runs `pixi run test` on Ubuntu. CI does not run the GPU tests.
-- One job checks that the vector data is current, and one that the derived data and dumps are.
+- One job checks that the vector data is current, and one that the dumps and the conformance files are.
