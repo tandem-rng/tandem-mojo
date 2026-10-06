@@ -5,7 +5,7 @@
 
 from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left
 from std.builtin.globals import global_constant
-from std.math import fma, iota, sqrt
+from std.math import fma, iota, isfinite, sqrt
 from std.memory import bitcast, stack_allocation
 from std.sys import bit_width_of, has_accelerator, is_gpu
 from max.gpu import barrier, block_dim, block_idx, thread_idx
@@ -182,6 +182,7 @@ def fork_key(key: SIMD[DType.uint32, 4], block: UInt64, index: UInt64) -> SIMD[D
 # ---- Generator -----------------------------------------------------------------------------
 
 comptime DEFAULT_K: UInt32 = 32
+comptime POSITION_LIMIT: UInt64 = 1 << 63
 
 # Purposes reserved for the fallback generators of the bounded fills.
 comptime PURPOSE_BELOW32: UInt64 = 0x424C573332
@@ -470,6 +471,103 @@ def below_retry_u64(key: SIMD[DType.uint32, 4], K: UInt32, n: UInt64, e: UInt64)
             return UInt64(m >> 64)
 
 
+# ---- Weighted choice -----------------------------------------------------------------------
+# Appendix C of the specification: an alias table in exact integers, so every port builds the
+# same table and returns the same indices.
+
+@always_inline
+def bit_length(x: UInt64) -> Int:
+    return bit_width_of[DType.uint64]() - Int(count_leading_zeros(x))
+
+
+def ceil_scaled(s: UInt64, e: Int, t: Int) -> UInt64:
+    """ceil(s 2^(e + t)) for a significand s below 2^53, exact. The caller keeps it below 2^64."""
+    var k = e + t
+    if s == 0:
+        return 0
+    if k >= 0:
+        return s << UInt64(k)
+    if k <= -54:
+        return 1
+    var sh = UInt64(-k)
+    return (s >> sh) + UInt64((s & ((UInt64(1) << sh) - 1)) != 0)
+
+
+struct ChoiceTable(Copyable, Movable):
+    """The alias table of weights: index j of m has cut[j] of the column capacity and alias[j]
+    gets the rest. Building draws nothing."""
+
+    var cut: List[UInt64]
+    var alias: List[UInt32]
+    var capacity: UInt64
+
+    def __init__(out self, weights: List[Float64]) raises:
+        """Raises unless 1 <= m < 2^32 and the weights are finite, not negative and not all
+        zero. A weight of -0.0 is zero."""
+        var m = len(weights)
+        if m == 0 or m > 0xFFFFFFFF:
+            raise Error("a choice table needs 1 to 2^32 - 1 weights")
+        var sig = List[UInt64](length=m, fill=0)
+        var ex = List[Int](length=m, fill=0)
+        var top = 0
+        for i in range(m):
+            var w = weights[i]
+            if not (isfinite(w) and w >= 0.0):
+                raise Error("weights must be finite and not negative")
+            var bits = bitcast[DType.uint64, 1](w)
+            var biased = Int((bits >> 52) & 0x7FF)
+            var frac = bits & 0xFFFFFFFFFFFFF
+            sig[i] = frac if biased == 0 else frac | (UInt64(1) << 52)
+            ex[i] = -1074 if biased == 0 else biased - 1075
+            if w > weights[top]:
+                top = i
+        if weights[top] == 0.0:
+            raise Error("at least one weight must be positive")
+        # floor(log2(max weight)) from its significand and exponent.
+        var e = bit_length(sig[top]) - 1 + ex[top]
+        var t = 63 - bit_length(UInt64(m)) - e
+        var total = UInt64(0)
+        for i in range(m):
+            total += ceil_scaled(sig[i], ex[i], t)
+        t += 63 - bit_length(total)
+        self.cut = List[UInt64](length=m, fill=0)
+        self.alias = List[UInt32](length=m, fill=0)
+        total = 0
+        var big = 0
+        for i in range(m):
+            self.cut[i] = ceil_scaled(sig[i], ex[i], t)
+            total += self.cut[i]
+            if self.cut[i] > self.cut[big]:
+                big = i
+            self.alias[i] = UInt32(i)
+        var s = (total + UInt64(m) - 1) // UInt64(m)
+        self.cut[big] += s * UInt64(m) - total
+        self.capacity = s
+        var l = 0
+        while self.cut[l] < s:
+            l += 1
+        for i in range(m):
+            var j = i
+            while j <= i and self.cut[j] < s:
+                self.alias[j] = UInt32(l)
+                self.cut[l] -= s - self.cut[j]
+                j = l
+                if self.cut[l] < s:
+                    l += 1
+                    while l < m and self.cut[l] < s:
+                        l += 1
+
+    @always_inline
+    def index(self, r: UInt64) -> UInt32:
+        """The index of one 64-bit draw: a column from the high word of r m, and the low word
+        against the column's cut."""
+        var m = UInt64(len(self.cut))
+        var x = UInt128(r) * UInt128(m)
+        var j = Int(UInt64(x >> 64))
+        var v = UInt64((UInt128(UInt64(x & 0xFFFFFFFFFFFFFFFF)) * UInt128(self.capacity)) >> 64)
+        return UInt32(j) if v < self.cut[j] else self.alias[j]
+
+
 struct Tandem(Copyable, Movable, Equatable):
     """A generator: key, bit position, chunk length K, and a cache of the current row.
     Equality covers the transport form only. Every draw aligns the position to the width of
@@ -501,6 +599,8 @@ struct Tandem(Copyable, Movable, Equatable):
         """A generator from its transport form. K must be a power of two in 1 to 65536."""
         if k == 0 or (k & (k - 1)) != 0 or k > 65536:
             raise Error("chunk length must be a power of two in 1..=65536")
+        if position >= POSITION_LIMIT:
+            raise Error("a position must be below 2^63")
         return Self(trusted_key=key, position=position, k=k)
 
     def __eq__(self, other: Self) -> Bool:
@@ -509,7 +609,10 @@ struct Tandem(Copyable, Movable, Equatable):
     def position(self) -> UInt64:
         return self.pos
 
-    def set_position(mut self, position: UInt64):
+    def set_position(mut self, position: UInt64) raises:
+        """Move to a bit position below 2^63. Anything else raises and changes nothing."""
+        if position >= POSITION_LIMIT:
+            raise Error("a position must be below 2^63")
         self.pos = position
 
     # Rows ----------------------------------------------------------------------------------
@@ -609,73 +712,81 @@ struct Tandem(Copyable, Movable, Equatable):
 
     # Fills ---------------------------------------------------------------------------------
 
+    def fill_start(self, w: UInt64, n: Int) raises -> UInt64:
+        """The aligned start of a fill of n elements of w bits. A fill that would end at or
+        beyond bit 2^64 raises here, before anything is written or moved."""
+        var a = (UInt128(self.pos) + UInt128(w) - 1) & ~(UInt128(w) - 1)
+        if a + UInt128(w) * UInt128(n) >= (UInt128(1) << 64):
+            raise Error("a fill must end below bit 2^64")
+        return UInt64(a)
+
     @always_inline
-    def fill[kind: Int, W: Int, T: DType, origin: Origin[mut=True]](mut self, dst: Pointer[Scalar[T], origin], n: Int):
+    def fill[kind: Int, W: Int, T: DType, origin: Origin[mut=True]](mut self, dst: Pointer[Scalar[T], origin], n: Int) raises:
         """The values n scalar draws would produce, written row by row. The cache stays on the
         last row written."""
-        var p = align(self.pos, UInt64(W))
+        var p = self.fill_start(UInt64(W), n)
         self.pos = p + UInt64(W) * UInt64(n)
         if n > 0:
             fill_rows[kind, W, T](self.cur, self.key, self.k, p, n, dst.unsafe_origin_cast[MutAnyOrigin]())
             self.words_valid = False
 
-    def fill_u8[origin: Origin[mut=True]](mut self, dst: Pointer[UInt8, origin], n: Int):
+    def fill_u8[origin: Origin[mut=True]](mut self, dst: Pointer[UInt8, origin], n: Int) raises:
         self.fill[KIND_INT, 8, DType.uint8](dst, n)
 
-    def fill_u16[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int):
+    def fill_u16[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int) raises:
         self.fill[KIND_INT, 16, DType.uint16](dst, n)
 
-    def fill_u32[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], n: Int):
+    def fill_u32[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], n: Int) raises:
         self.fill[KIND_INT, 32, DType.uint32](dst, n)
 
-    def fill_u64[origin: Origin[mut=True]](mut self, dst: Pointer[UInt64, origin], n: Int):
+    def fill_u64[origin: Origin[mut=True]](mut self, dst: Pointer[UInt64, origin], n: Int) raises:
         self.fill[KIND_INT, 64, DType.uint64](dst, n)
 
-    def fill_u128[origin: Origin[mut=True]](mut self, dst: Pointer[UInt128, origin], n: Int):
+    def fill_u128[origin: Origin[mut=True]](mut self, dst: Pointer[UInt128, origin], n: Int) raises:
         """128-bit elements, each as its low then its high 64-bit draw."""
-        self.pos = align(self.pos, 128)
+        self.pos = self.fill_start(128, n)
         self.fill[KIND_INT, 64, DType.uint64](dst.unsafe_bitcast[UInt64](), 2 * n)
 
-    def fill_i8[origin: Origin[mut=True]](mut self, dst: Pointer[Int8, origin], n: Int):
+    def fill_i8[origin: Origin[mut=True]](mut self, dst: Pointer[Int8, origin], n: Int) raises:
         self.fill[KIND_INT, 8, DType.int8](dst, n)
 
-    def fill_i16[origin: Origin[mut=True]](mut self, dst: Pointer[Int16, origin], n: Int):
+    def fill_i16[origin: Origin[mut=True]](mut self, dst: Pointer[Int16, origin], n: Int) raises:
         self.fill[KIND_INT, 16, DType.int16](dst, n)
 
-    def fill_i32[origin: Origin[mut=True]](mut self, dst: Pointer[Int32, origin], n: Int):
+    def fill_i32[origin: Origin[mut=True]](mut self, dst: Pointer[Int32, origin], n: Int) raises:
         self.fill[KIND_INT, 32, DType.int32](dst, n)
 
-    def fill_i64[origin: Origin[mut=True]](mut self, dst: Pointer[Int64, origin], n: Int):
+    def fill_i64[origin: Origin[mut=True]](mut self, dst: Pointer[Int64, origin], n: Int) raises:
         self.fill[KIND_INT, 64, DType.int64](dst, n)
 
-    def fill_i128[origin: Origin[mut=True]](mut self, dst: Pointer[Int128, origin], n: Int):
-        self.pos = align(self.pos, 128)
+    def fill_i128[origin: Origin[mut=True]](mut self, dst: Pointer[Int128, origin], n: Int) raises:
+        self.pos = self.fill_start(128, n)
         self.fill[KIND_INT, 64, DType.uint64](dst.unsafe_bitcast[UInt64](), 2 * n)
 
-    def fill_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], n: Int):
+    def fill_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], n: Int) raises:
         self.fill[KIND_F32, 32, DType.float32](dst, n)
 
-    def fill_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], n: Int):
+    def fill_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], n: Int) raises:
         self.fill[KIND_F64, 64, DType.float64](dst, n)
 
-    def fill_f16_bits[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int):
+    def fill_f16_bits[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int) raises:
         self.fill[KIND_F16, 16, DType.uint16](dst, n)
 
-    def fill_char[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], n: Int):
+    def fill_char[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], n: Int) raises:
         """Unicode scalar values as code points, 64 stream bits each."""
         self.fill[KIND_CHAR, 64, DType.uint32](dst, n)
 
-    def fill_bool[origin: Origin[mut=True]](mut self, dst: Pointer[Bool, origin], n: Int):
+    def fill_bool[origin: Origin[mut=True]](mut self, dst: Pointer[Bool, origin], n: Int) raises:
         self.fill[KIND_BOOL, 1, DType.uint8](dst.unsafe_bitcast[UInt8](), n)
 
-    def fill_c32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], n: Int):
+    def fill_c32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], n: Int) raises:
         """n complex values as interleaved (re, im): the f32 fill of length 2n."""
         self.fill_f32(dst, 2 * n)
 
-    def fill_c64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], n: Int):
+    def fill_c64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], n: Int) raises:
         self.fill_f64(dst, 2 * n)
 
-    def fill_c16_bits[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int):
+    def fill_c16_bits[origin: Origin[mut=True]](mut self, dst: Pointer[UInt16, origin], n: Int) raises:
         self.fill_f16_bits(dst, 2 * n)
 
     # Random access -------------------------------------------------------------------------
@@ -726,7 +837,7 @@ struct Tandem(Copyable, Movable, Equatable):
                 m = UInt128(self.next_u64()) * UInt128(n)
         return UInt64(m >> 64)
 
-    def fill_below_u32[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], count: Int, n: UInt32):
+    def fill_below_u32[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], count: Int, n: UInt32) raises:
         """Element i takes draw i of the u32 fill, and the fill consumes exactly count draws
         whatever is rejected, so rows fill independently. A rejected draw retries with Lemire's
         rule on the draws of key.sub(PURPOSE_BELOW32).split(g) at position 0, where g is the global
@@ -741,6 +852,7 @@ struct Tandem(Copyable, Movable, Equatable):
         comptime BLOCK = 1024
         if count == 0:
             return
+        _ = self.fill_start(32, count)
         var t = (UInt32(0) - n) % n if n != 0 else UInt32(0)
         var nv = SIMD[DType.uint32, W](n).cast[DType.uint64]()
         var draws = stack_allocation[BLOCK, UInt32]()
@@ -773,12 +885,12 @@ struct Tandem(Copyable, Movable, Equatable):
                         dst.unsafe_offset(done + k).unsafe_store(below_retry_u32(self.key, self.k, n, UInt64(first_draw + done + k)))
             done += m
 
-    def fill_below_u64[origin: Origin[mut=True]](mut self, dst: Pointer[UInt64, origin], count: Int, n: UInt64):
+    def fill_below_u64[origin: Origin[mut=True]](mut self, dst: Pointer[UInt64, origin], count: Int, n: UInt64) raises:
         """The u64 form of fill_below_u32, with PURPOSE_BELOW64 and g = start position / 64 + i. It converts row by row, fused
         with the row generator."""
         if count == 0:
             return
-        var p = align(self.pos, 64)
+        var p = self.fill_start(64, count)
         self.pos = p + 64 * UInt64(count)
         var t = (UInt64(0) - n) % n if n != 0 else UInt64(0)
         fill_rows_below_u64(self.cur, self.key, self.k, p, count, dst.unsafe_origin_cast[MutAnyOrigin](), n, t)
@@ -807,7 +919,7 @@ struct Tandem(Copyable, Movable, Equatable):
         """A standard normal: the cos half of normal2_f32, which consumes both draws."""
         return self.normal2_f32()[0]
 
-    def fill_normal_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int):
+    def fill_normal_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int) raises:
         """Element i is the ziggurat of draw i of the u64 fill, and the fill consumes count draws.
         An empty fill aligns the position to 64 bits.
 
@@ -815,7 +927,7 @@ struct Tandem(Copyable, Movable, Equatable):
         queue across blocks, so that their fallbacks are seeded eight at a time. Blocks after the
         first start at a row, 16 draws, so that the u64 fill runs whole rows."""
         comptime BLOCK = 512
-        var p = align(self.pos, 64)
+        var p = self.fill_start(64, count)
         self.pos = p
         var first = p >> 6
         var out = dst.unsafe_origin_cast[MutAnyOrigin]()
@@ -851,7 +963,7 @@ struct Tandem(Copyable, Movable, Equatable):
                     raw.unsafe_offset(t).unsafe_store(raw.unsafe_offset(full + t).unsafe_load())
                 nq -= full
 
-    def fill_normal_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int):
+    def fill_normal_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int) raises:
         """The flattened sequence of normal2_f32 calls, bit for bit. An odd count keeps the cos
         half of its last pair and still consumes both draws. An empty fill moves nothing.
 
@@ -861,6 +973,7 @@ struct Tandem(Copyable, Movable, Equatable):
         comptime BLOCK = 256
         var draws = stack_allocation[2 * BLOCK, Float32]()
         var pairs = count // 2 + count % 2
+        _ = self.fill_start(32, 2 * pairs)
         var done = 0
         var head = head_elements[32](align(self.pos, 32))
         while pairs > 0:
@@ -901,11 +1014,12 @@ struct Tandem(Copyable, Movable, Equatable):
         """An Exp(1) draw from one f32 draw, computed in f32."""
         return 0.5 * neg2_log_f32[1](SIMD[DType.float32, 1](1.0 - self.next_f32()))[0]
 
-    def fill_exponential_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int):
+    def fill_exponential_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int) raises:
         """Element i is exponential_f64 of draw i. The uniforms go into the output in blocks
         that stay in L1 for the in-place map."""
         comptime W = 8
         comptime BLOCK = 1024
+        _ = self.fill_start(64, count)
         var done = 0
         while done < count:
             var m = min(BLOCK, count - done)
@@ -920,10 +1034,11 @@ struct Tandem(Copyable, Movable, Equatable):
                 j += 1
             done += m
 
-    def fill_exponential_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int):
+    def fill_exponential_f32[origin: Origin[mut=True]](mut self, dst: Pointer[Float32, origin], count: Int) raises:
         """The f32 form of fill_exponential_f64."""
         comptime W = 16
         comptime BLOCK = 1024
+        _ = self.fill_start(32, count)
         var done = 0
         while done < count:
             var m = min(BLOCK, count - done)
@@ -936,6 +1051,27 @@ struct Tandem(Copyable, Movable, Equatable):
             while j < m:
                 p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[1](1.0 - p.unsafe_offset(j).unsafe_load[width=1]()))
                 j += 1
+            done += m
+
+    # Weighted choice -----------------------------------------------------------------------
+
+    def choice(mut self, table: ChoiceTable) -> UInt32:
+        """An index from one u64 draw, equal to element 0 of fill_choice."""
+        return table.index(self.next_u64())
+
+    def fill_choice[origin: Origin[mut=True]](mut self, dst: Pointer[UInt32, origin], count: Int, table: ChoiceTable) raises:
+        """Element i is the index of draw i of the u64 fill, with no retry, so a fill cut
+        anywhere equals the whole fill. An empty fill aligns the position to 64 bits."""
+        comptime BLOCK = 512
+        var p = self.fill_start(64, count)
+        self.pos = p
+        var draws = stack_allocation[BLOCK, UInt64]()
+        var done = 0
+        while done < count:
+            var m = min(BLOCK, count - done)
+            self.fill_u64(draws, m)
+            for i in range(m):
+                dst.unsafe_offset(done + i).unsafe_store(table.index(draws.unsafe_offset(i).unsafe_load()))
             done += m
 
     # Derived generators --------------------------------------------------------------------

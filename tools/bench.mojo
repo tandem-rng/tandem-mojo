@@ -29,7 +29,7 @@ struct Buffers:
         self.f64 = unsafe_alloc[Float64](n)
 
 
-def tandem[which: Int](mut g: Tandem, b: Buffers):
+def tandem[which: Int](mut g: Tandem, b: Buffers) raises:
     g.set_position(0)
     comptime if which == 0:
         g.fill_u32(b.u32, N)
@@ -74,7 +74,7 @@ def baseline[which: Int](b: Buffers):
         randn[DType.float64](b.f64, N)
 
 
-def best[which: Int, ours: Bool](mut g: Tandem, b: Buffers) -> Float64:
+def best[which: Int, ours: Bool](mut g: Tandem, b: Buffers) raises -> Float64:
     var warm = perf_counter_ns()
     while perf_counter_ns() - warm < 500_000_000:
         comptime if ours:
@@ -92,7 +92,7 @@ def best[which: Int, ours: Bool](mut g: Tandem, b: Buffers) -> Float64:
     return t
 
 
-def row[which: Int](name: String, bytes: Int, mut g: Tandem, b: Buffers):
+def row[which: Int](name: String, bytes: Int, mut g: Tandem, b: Buffers) raises:
     var ours = gibs(bytes * N, best[which, True](g, b))
     var theirs = gibs(bytes * N, best[which, False](g, b))
     print("cpu", name, "2^24 elements", ours, "GiB/s, baseline", theirs, "GiB/s")

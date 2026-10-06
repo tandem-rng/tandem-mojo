@@ -12,7 +12,7 @@ def gibs(bytes: Int, seconds: Float64) -> Float64:
     return Float64(bytes) / seconds / 1073741824.0
 
 
-def run[which: Int](mut g: Tandem, d: Pointer[Float64, MutUntrackedOrigin], f: Pointer[Float32, MutUntrackedOrigin], n: Int):
+def run[which: Int](mut g: Tandem, d: Pointer[Float64, MutUntrackedOrigin], f: Pointer[Float32, MutUntrackedOrigin], n: Int) raises:
     g.set_position(0)
     comptime if which == 0:
         g.fill_exponential_f64(d, n)
@@ -26,7 +26,7 @@ def run[which: Int](mut g: Tandem, d: Pointer[Float64, MutUntrackedOrigin], f: P
             f.unsafe_offset(i).unsafe_store(-log(1.0 - random_float64().cast[DType.float32]()))
 
 
-def time_best[which: Int](name: String, bytes: Int, mut g: Tandem, d: Pointer[Float64, MutUntrackedOrigin], f: Pointer[Float32, MutUntrackedOrigin], n: Int):
+def time_best[which: Int](name: String, bytes: Int, mut g: Tandem, d: Pointer[Float64, MutUntrackedOrigin], f: Pointer[Float32, MutUntrackedOrigin], n: Int) raises:
     var warm = perf_counter_ns()
     while perf_counter_ns() - warm < 200_000_000:
         run[which](g, d, f, n)
