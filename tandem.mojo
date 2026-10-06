@@ -1,6 +1,6 @@
 # Tandem8x32 in Mojo, after https://github.com/tandem-rng/spec: the building blocks, the Tandem
-# generator with scalar draws, CPU fills over eight SIMD lanes, and GPU fills with one thread
-# per chunk.
+# generator with scalar draws, CPU fills over eight SIMD lanes, and GPU fills through a shared-memory
+# tile.
 # Copyright 2026 Jessica Cox. Apache License 2.0, see LICENSE.
 
 from std.bit import count_leading_zeros, count_trailing_zeros, rotate_bits_left
@@ -8,8 +8,9 @@ from std.builtin.globals import global_constant
 from std.math import fma, iota, sqrt
 from std.memory import bitcast, stack_allocation
 from std.sys import bit_width_of, has_accelerator
-from max.gpu import block_dim, block_idx, thread_idx
+from max.gpu import barrier, block_dim, block_idx, thread_idx
 from max.gpu.host import DeviceContext
+from max.gpu.memory import AddressSpace
 
 from zig_tables import ZIG_K, ZIG_R_BITS, ZIG_W, ZIG_Y
 
@@ -93,7 +94,7 @@ struct Lanes[W: Int](Copyable, Movable):
     def f(mut self):
         """The seeding function F: eight rounds of T, a round constant, and a half swap."""
 
-        for r in range(8):
+        comptime for r in range(8):
             self.step()
             self.o0 ^= RC[r]
             self.o0, self.h0 = self.h0, self.o0
@@ -1118,9 +1119,54 @@ def fill_rows_kernel[kind: Int, T: DType](dst: Pointer[Scalar[T], MutAnyOrigin],
             dst.unsafe_offset(at).unsafe_store(block_elements[kind, T](SIMD[DType.uint32, 4](s.o0[0], s.o1[0], s.o2[0], s.o3[0])))
 
 
+comptime TILE_STEPS = 8
+comptime TILE_GROUPS = 32
+
+
+def fill_tile_kernel[kind: Int, T: DType, ALIGNED: Bool](dst: Pointer[Scalar[T], MutAnyOrigin], k0: UInt32, k1: UInt32, k2: UInt32, k3: UInt32, first_row: UInt64, nrows: UInt64, K: UInt32):
+    """One thread per chunk, 32 groups per block, output staged through shared memory: every
+    TILE_STEPS steps each group's rows are 1024 contiguous bytes of the output, and consecutive
+    threads store consecutive 16-byte slots of them, so a warp writes 512 contiguous bytes. Needs K
+    to be a multiple of TILE_STEPS. ALIGNED: dst sits on 16 bytes, so a slot is one 16-byte store."""
+    comptime N = 128 // bit_width_of[T]()
+    var tile = stack_allocation[TILE_GROUPS * TILE_STEPS * 8 * 4, UInt32, alignment=16, address_space=AddressSpace.SHARED]()
+    var t = Int(thread_idx.x)
+    var g0 = first_row / UInt64(K) + UInt64(block_idx.x) * TILE_GROUPS
+    var gi = t // 8
+    var lane = t % 8
+    var c = 8 * (g0 + UInt64(gi)) + UInt64(lane)
+    var key = SIMD[DType.uint32, 4](k0, k1, k2, k3)
+    var s = State.keyed(key, SIMD[DType.uint32, 1](UInt32(c & 0xFFFFFFFF)), SIMD[DType.uint32, 1](UInt32(c >> 32)), DOMAIN_STREAM, AUX_STREAM)
+    for jb in range(0, Int(K), TILE_STEPS):
+        comptime for j in range(TILE_STEPS):
+            s.step()
+            tile.unsafe_offset(4 * (gi * TILE_STEPS * 8 + j * 8 + lane)).unsafe_store[alignment=16](SIMD[DType.uint32, 4](s.o0[0], s.o1[0], s.o2[0], s.o3[0]))
+        barrier()
+        comptime for i in range(TILE_STEPS):
+            var slot = t + TILE_GROUPS * 8 * i
+            var within = slot % (TILE_STEPS * 8)
+            var row = (g0 + UInt64(slot // (TILE_STEPS * 8))) * UInt64(K) + UInt64(jb + within // 8)
+            if row >= first_row and row < first_row + nrows:
+                var at = Int((row - first_row) * UInt64(1024 // bit_width_of[T]()) + UInt64((within % 8) * N))
+                var v = block_elements[kind, T](tile.unsafe_offset(4 * slot).unsafe_load[width=4, alignment=16]())
+                comptime if ALIGNED:
+                    dst.unsafe_offset(at).unsafe_store[alignment=16](v)
+                else:
+                    dst.unsafe_offset(at).unsafe_store(v)
+        barrier()
+
+
 def fill_gpu[kind: Int, T: DType, origin: Origin[mut=True]](ctx: DeviceContext, key: SIMD[DType.uint32, 4], first_row: UInt64, nrows: UInt64, K: UInt32, dst: Pointer[Scalar[T], origin]) raises:
-    """Rows [first_row, first_row + nrows) into device memory, 1024 / W elements per row."""
+    """Rows [first_row, first_row + nrows) into device memory, 1024 / W elements per row. The tile
+    kernel runs when K is a multiple of 8, the direct kernel otherwise."""
     var groups = (first_row + nrows + UInt64(K) - 1) / UInt64(K) - first_row / UInt64(K)
+    if K % TILE_STEPS == 0:
+        var blocks = Int((groups + TILE_GROUPS - 1) / TILE_GROUPS)
+        if Int(dst) % 16 == 0:
+            ctx.enqueue_function[fill_tile_kernel[kind, T, True]](dst.unsafe_origin_cast[MutAnyOrigin](), key[0], key[1], key[2], key[3], first_row, nrows, K, grid_dim=blocks, block_dim=TILE_GROUPS * 8)
+        else:
+            ctx.enqueue_function[fill_tile_kernel[kind, T, False]](dst.unsafe_origin_cast[MutAnyOrigin](), key[0], key[1], key[2], key[3], first_row, nrows, K, grid_dim=blocks, block_dim=TILE_GROUPS * 8)
+        return
     var threads = Int(groups * 8)
     ctx.enqueue_function[fill_rows_kernel[kind, T]](dst.unsafe_origin_cast[MutAnyOrigin](), key[0], key[1], key[2], key[3], first_row, nrows, K, grid_dim=(threads + 255) // 256, block_dim=256)
 
