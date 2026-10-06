@@ -29,16 +29,21 @@ of the 0.43 % of draws that miss the ziggurat's inner rectangles.
 ## GPU
 
 GPU fills into device memory, `pixi run bench-gpu`, 1 GiB per fill, minimum of 21 after a
-half-second warm-up, GPU idle, in GiB/s.
+half-second warm-up, in GiB/s. The GPU had no other process, and a second run agreed within 1 %.
+The cuRAND column is Philox4x32-10 of cuRAND 10.3.9 in the same run, by the same method, through
+its host API in the `DeviceContext`'s context. cuRAND has no 64-bit integer output for Philox, so
+the `u64` row's figure is `curandGenerate` writing the same bytes as 32-bit words, marked
+"nearest".
 
-| NVIDIA A100 40 GB PCIe | GiB/s |
-|---|---|
-| `fill_u32_gpu` | 1186 |
-| `fill_u64_gpu` | 1208 |
-| `fill_f32_gpu` | 1160 |
-| `fill_f64_gpu` | 1188 |
+| NVIDIA A100 40 GB PCIe | GiB/s | cuRAND Philox4x32-10 | cuRAND call |
+|---|---|---|---|
+| `fill_u32_gpu` | 1189 | 1309 | `curandGenerate` |
+| `fill_u64_gpu` | 1201 | 1302 | `curandGenerate`, nearest |
+| `fill_f32_gpu` | 1171 | 1277 | `curandGenerateUniform` |
+| `fill_f64_gpu` | 1188 | 797 | `curandGenerateUniformDouble` |
 
-The GPU kernel stores each block from registers and has no shared-memory tile.
+The GPU kernel stores each block from registers and has no shared-memory tile, so the 32-bit
+fills run below cuRAND's. tandem-cuda's tile kernel reaches 1377 to 1388 GiB/s on the same card.
 
 ## Other generators
 

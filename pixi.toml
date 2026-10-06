@@ -7,6 +7,12 @@ platforms = ["osx-arm64", "linux-64"]
 mojo = ">=1.1"
 max = ">=26.6"
 
+# cuRAND for the GPU bench's comparison rows on GPU hosts.
+[target.linux-64.dependencies]
+cuda-version = "12.8.*"
+libcurand = "*"
+cuda-cudart = "*"
+
 [tasks]
 test = "mojo run -I . tests/test_tandem.mojo && mojo run -I . -I tests tests/test_fills.mojo && mojo run -I . -I tests tests/test_vectors.mojo && mojo run -I . -I tests tests/test_dumps.mojo && mojo run -I . -I tests tests/test_derived.mojo"
 bench = "mojo run -I . tools/bench.mojo"
