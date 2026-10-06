@@ -6,8 +6,9 @@
   cache of the current 1024-bit row.
 - Scalar draws include signed integers. Seed whitening and a raw-key constructor are
   available. Random access is `at_*`.
-- GPU fills into device memory for `u32`, `u64`, `f32` and `f64`: one thread per chunk, each
-  thread stores its blocks from registers.
+- GPU fills into device memory for `u32`, `u64`, `f32` and `f64`: one thread per chunk, 32 groups
+  per block staging eight steps in shared memory, so a warp stores 512 contiguous bytes. For K not
+  a multiple of 8 each thread stores its blocks from registers.
 
 ## Bounded integers
 
