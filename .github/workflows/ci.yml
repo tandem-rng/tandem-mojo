@@ -46,5 +46,5 @@ jobs:
           git -C ../tandem-c checkout -q 684e273b3766f223794130f01a1604b201de573d
           diff -r ../tandem-c/tests/data tests/data
           git clone -q https://github.com/tandem-rng/spec ../tandem-spec
-          git -C ../tandem-spec checkout -q b31af7238076b414a3eb2a128bfd010cce136287
+          git -C ../tandem-spec checkout -q 2a4bd08205596bc12bb7ae102862c97a0477dc2e
           for f in tests/conformance/*.json; do cmp "$f" "../tandem-spec/conformance/$(basename "$f")"; done
