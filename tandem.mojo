@@ -271,6 +271,34 @@ def neg2_log_f32[W: Int](x: SIMD[DType.float32, W]) -> SIMD[DType.float32, W]:
 
 
 @always_inline
+def neg_log_f32[W: Int](x: SIMD[DType.float32, W]) -> SIMD[DType.float32, W]:
+    """-ln x for the Float32 exponentials, tandem-c's neg_log_f32: within 0.571 ulp for every
+    x = 1 - u on the 2^-24 grid, so that 1 - exp(-x) maps each draw back to its own grid point.
+    u = (2 - 2m) / (m + 1) is carried as uh + r / d with m + 1 = d + dl exactly, and
+    nk ln2_hi + uh is split by fast two-sum, exact because nk ln2_hi is either 0 or larger than
+    |uh|. uh rounds in an fma, so that no contraction feeds the unrounded num * rcp to the
+    two-sum."""
+    var bits = bitcast[DType.uint32, W](x)
+    var ix = bits + 0x004AFB0D
+    var nk = (127 - (ix >> 23).cast[DType.int32]()).cast[DType.float32]()
+    var m = bitcast[DType.float32, W]((ix & 0x007FFFFF) + 0x3F3504F3)
+    var num = fma(m, SIMD[DType.float32, W](-2.0), 2.0)
+    var d = m + 1.0
+    var dl = m - (d - 1.0)
+    var rcp = 1.0 / d
+    var uh = fma(num, rcp, 0.0)
+    var r = fma(-uh, dl, fma(-uh, d, num))
+    var v = uh * uh
+    var q = SIMD[DType.float32, W](0.0023109776)
+    q = fma(v, q, 0.012496489)
+    q = fma(v, q, 0.08333336)
+    var k_hi = nk * 0.693145751953125
+    var hi = k_hi + uh
+    var e = uh - (hi - k_hi)
+    return hi + fma(uh * v, q, fma(r, rcp, fma(nk, 1.428606765330187e-06, e)))
+
+
+@always_inline
 def sincos_2pi_f32[W: Int](b: SIMD[DType.float32, W]) -> Tuple[SIMD[DType.float32, W], SIMD[DType.float32, W]]:
     """(sin, cos) of 2 pi b for b in [0, 1). b - q/4 for the nearest quarter turn q is exact,
     which leaves the angle th in [-pi/4, pi/4] for the polynomials. 2 pi is a pair of floats so
@@ -1012,7 +1040,7 @@ struct Tandem(Copyable, Movable, Equatable):
 
     def exponential_f32(mut self) -> Float32:
         """An Exp(1) draw from one f32 draw, computed in f32."""
-        return 0.5 * neg2_log_f32[1](SIMD[DType.float32, 1](1.0 - self.next_f32()))[0]
+        return neg_log_f32[1](SIMD[DType.float32, 1](1.0 - self.next_f32()))[0]
 
     def fill_exponential_f64[origin: Origin[mut=True]](mut self, dst: Pointer[Float64, origin], count: Int) raises:
         """Element i is exponential_f64 of draw i. The uniforms go into the output in blocks
@@ -1046,10 +1074,10 @@ struct Tandem(Copyable, Movable, Equatable):
             self.fill_f32(p, m)
             var j = 0
             while j + W <= m:
-                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[W](1.0 - p.unsafe_offset(j).unsafe_load[width=W]()))
+                p.unsafe_offset(j).unsafe_store(neg_log_f32[W](1.0 - p.unsafe_offset(j).unsafe_load[width=W]()))
                 j += W
             while j < m:
-                p.unsafe_offset(j).unsafe_store(0.5 * neg2_log_f32[1](1.0 - p.unsafe_offset(j).unsafe_load[width=1]()))
+                p.unsafe_offset(j).unsafe_store(neg_log_f32[1](1.0 - p.unsafe_offset(j).unsafe_load[width=1]()))
                 j += 1
             done += m
 

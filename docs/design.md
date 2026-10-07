@@ -50,7 +50,9 @@
 ## Exponentials
 
 - Exponentials are `-log(1 - u)` of one uniform per element. Element `i` of a fill is the
-  scalar draw `i`, and an empty fill moves nothing. They reuse the polynomial logarithm of the
-  normals with an explicit fused multiply-add for every multiply-add, in `f64` from `f64` draws
-  and in `f32` from `f32` draws, so the bytes equal `tandem-c`'s (FNV-1a `47f8f98297d94ee2`
-  over 1e6 values of each width from five positions).
+  scalar draw `i`, and an empty fill moves nothing. `f64` reuses the polynomial logarithm of
+  the normals. `f32` is tandem-c's `neg_log_f32`: it carries `(2 - 2m) / (m + 1)` in two floats
+  and adds `k ln 2` by an exact two-sum, within 0.571 ulp, so `1 - exp(-x)` maps every draw
+  back to its own 2^-24 grid point. Every multiply-add is an explicit fused multiply-add, in
+  `f64` from `f64` draws and in `f32` from `f32` draws, so the bytes equal `tandem-c`'s (FNV-1a
+  `1c761a2d471073c2` over 1e6 values of each width from five positions).
