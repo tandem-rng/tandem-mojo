@@ -1,4 +1,4 @@
-# Speed
+# Performance
 
 `pixi run bench` and `pixi run bench-exponential` produce the CPU figures, `pixi run bench-gpu`
 the GPU figures.

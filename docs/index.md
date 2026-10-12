@@ -7,7 +7,7 @@ fills on CPUs and MAX fills on GPUs.
 - [API](api.md): the generator, draws, fills, bounded integers, normals, exponentials and GPU fills.
 - [Design](design.md): how the fills, bounded integers, normals and exponentials work.
 - [Tests](tests.md): what the suite checks, where the fixtures come from, and what CI runs.
-- [Speed](speed.md): Apple M4 and A100 figures.
+- [Performance](speed.md): Apple M4 and A100 figures.
 
 ## Install
 
