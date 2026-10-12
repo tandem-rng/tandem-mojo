@@ -10,12 +10,16 @@ Mojo implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncr
 pseudorandom number generator, in one file, `tandem.mojo`. It produces the stream the
 specification defines, bit for bit, with SIMD fills on CPUs and MAX fills on GPUs.
 
-Install with pixi. It brings Mojo 1.1 and MAX 26.6 from the Modular conda channel.
+## Install
+
+Install with pixi.
 
 ```sh
 pixi install
 pixi run test
 ```
+
+## Quick start
 
 ```mojo
 from std.memory.alloc import unsafe_alloc
@@ -29,9 +33,15 @@ def main() raises:
     var z = worker.normal_f64()                # ziggurat, byte identical to tandem-c
 ```
 
+## Requirements
+
+Needs Mojo 1.1 and MAX 26.6 from the Modular conda channel.
+
+## Documentation
+
 See [API](docs/api.md) for every draw and the GPU fills, and [tests](docs/tests.md) and
 [speed](docs/speed.md) for the rest.
 
 Portions of the code were generated with the assistance of LLMs.
 
-[Documentation](https://tandem-rng.github.io/tandem-mojo/) · [Apache 2.0 license](LICENSE)
+[Docs](https://tandem-rng.github.io/tandem-mojo/) · [Specification](https://github.com/tandem-rng/spec/blob/main/SPEC.md) · [Website](https://tandem-rng.github.io/) · [Issues](https://github.com/tandem-rng/tandem-mojo/issues) · [License](LICENSE)
