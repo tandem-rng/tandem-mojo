@@ -1334,6 +1334,8 @@ def fill_gpu[kind: Int, T: DType, origin: Origin[mut=True]](ctx: DeviceContext, 
     """Rows [first_row, first_row + nrows) into device memory, 1024 / W elements per row. The tile
     kernel runs when K is a multiple of 8, the direct kernel otherwise."""
     var groups = (first_row + nrows + UInt64(K) - 1) / UInt64(K) - first_row / UInt64(K)
+    if nrows == 0:
+        return
     if K % TILE_STEPS == 0:
         var blocks = Int((groups + TILE_GROUPS - 1) / TILE_GROUPS)
         if Int(dst) % 16 == 0:

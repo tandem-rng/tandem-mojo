@@ -5,7 +5,7 @@ from std.memory.alloc import unsafe_alloc
 from std.sys import bit_width_of
 from max.gpu.host import DeviceContext
 
-from tandem import KIND_F32, KIND_F64, KIND_INT, Tandem, fill_gpu, fill_u32_gpu
+from tandem import KIND_F32, KIND_F64, KIND_INT, Tandem, fill_gpu, fill_u32_gpu, fill_u64_gpu, fill_f32_gpu, fill_f64_gpu
 
 comptime KEY = SIMD[DType.uint32, 4](1, 2, 3, 4)
 
@@ -56,8 +56,25 @@ def check[kind: Int, T: DType](ctx: DeviceContext, label: String) raises:
                 want.unsafe_free()
 
 
+def test_empty(ctx: DeviceContext) raises:
+    var dev = ctx.enqueue_create_buffer[DType.uint64](1)
+    var host = ctx.enqueue_create_host_buffer[DType.uint64](1)
+    host[0] = 123
+    ctx.enqueue_copy(dst_buf=dev, src_buf=host)
+    for K in [1, 8]:
+        for first_row in [0, 1]:
+            fill_u32_gpu(ctx, KEY, UInt64(first_row), 0, UInt32(K), dev.unsafe_ptr().unsafe_bitcast[UInt32]())
+            fill_u64_gpu(ctx, KEY, UInt64(first_row), 0, UInt32(K), dev.unsafe_ptr())
+            fill_f32_gpu(ctx, KEY, UInt64(first_row), 0, UInt32(K), dev.unsafe_ptr().unsafe_bitcast[Float32]())
+            fill_f64_gpu(ctx, KEY, UInt64(first_row), 0, UInt32(K), dev.unsafe_ptr().unsafe_bitcast[Float64]())
+            ctx.enqueue_copy(dst_buf=host, src_buf=dev)
+            ctx.synchronize()
+            assert_equal(host[0], UInt64(123))
+
+
 def main() raises:
     var ctx = DeviceContext()
+    test_empty(ctx)
     test_u32_dump(ctx)
     check[KIND_INT, DType.uint32](ctx, "u32")
     check[KIND_INT, DType.uint64](ctx, "u64")
